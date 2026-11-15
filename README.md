@@ -7,9 +7,10 @@ DoIP (Diagnostics over Internet Protocol, ISO 13400). A vehicle-side agent and a
 diagnostic client exchange a compact, copy-pasteable session code to establish a
 tunnel — no VPN setup and no vendor-specific software required.
 
-> **Status:** early skeleton (`v0.1.0`). The CLI, session-code format and
-> workspace layout are in place. Networking, transport and driver integration
-> are the next milestones.
+> **Status (2026-11-15):** Step 1 complete — workspace, `doip-core` session
+> codes and the interactive `doip-client` skeleton are in place. Next:
+> `doip-server` (relay TCP listener on tokio) and the shared wire protocol.
+> See [AGENTS.md](AGENTS.md) for the full project context and next steps.
 
 ## Highlights
 
