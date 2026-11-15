@@ -1,0 +1,17 @@
+# Rust build artifacts
+/target
+
+# Environment files (may contain secrets)
+.env
+.env.*
+!.env.example
+
+# Logs and temporary files
+*.log
+*.tmp
+
+# Editor / OS noise
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
