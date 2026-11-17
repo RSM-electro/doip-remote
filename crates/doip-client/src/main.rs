@@ -22,17 +22,12 @@ use app::{App, Focus, MenuItem};
 use colored::Colorize;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use doip_core::{Role, SessionCode};
+use drivers::InstallEvent;
 use tokio::sync::mpsc as tokio_mpsc;
 use tracing::{error, info, warn};
 
 /// Placeholder relay address until the networking layer is implemented.
 const RELAY_SERVER: &str = "auto";
-
-/// Result of a background driver installation.
-enum InstallEvent {
-    /// The background task finished.
-    Finished(Result<(), String>),
-}
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -41,7 +36,7 @@ async fn main() -> ExitCode {
 
     let mut app = App::new(logs);
     app.admin_status = drivers::is_admin();
-    let status = drivers::check_drivers();
+    let status = drivers::check_all();
     app.set_driver_status(status.npcap_installed, status.loopback_installed);
 
     log_startup_status(&app, status);
@@ -243,17 +238,7 @@ fn begin_install(app: &mut App, install_tx: &tokio_mpsc::UnboundedSender<Install
     app.is_installing = true;
     info!("Скачивание и установка драйверов...");
 
-    let install_tx = install_tx.clone();
-    tokio::spawn(async move {
-        let result = match tokio::task::spawn_blocking(drivers::install_drivers).await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(error)) => Err(error.to_string()),
-            Err(error) => Err(format!(
-                "фоновый поток установки завершился с ошибкой: {error}"
-            )),
-        };
-        let _ = install_tx.send(InstallEvent::Finished(result));
-    });
+    drivers::install_all_async(install_tx.clone());
 }
 
 fn handle_install_event(app: &mut App, event: InstallEvent) {
@@ -261,7 +246,7 @@ fn handle_install_event(app: &mut App, event: InstallEvent) {
         InstallEvent::Finished(result) => {
             app.is_installing = false;
 
-            let status = drivers::check_drivers();
+            let status = drivers::check_all();
             app.set_driver_status(status.npcap_installed, status.loopback_installed);
 
             match result {
@@ -303,7 +288,7 @@ fn accept_diag_code(input: &str) {
 
 /// Handles the destructive menu entry.
 ///
-/// Stage 3 only stops the application; stage 5 adds the actual driver and log
+/// Stage 4 only stops the application; stage 5 adds the actual driver and log
 /// removal.
 fn confirm_cleanup(app: &mut App) {
     app.show_confirm_delete = false;

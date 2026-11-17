@@ -10,13 +10,14 @@ and record important architecture decisions as they are made.
 
 - **Date:** 2026-11-17
 - **Phase:** Ratatui dashboard migration (stages 1-6) — in progress.
-- **Done:** Stage 3/6 — full ratatui dashboard: header, 70/30 menu and dot-aligned
-  status panel, bottom log console with focus/scroll, Diag code popup, delete
-  confirmation popup, and a key-reader thread. Terminal setup restores on
-  panic/Ctrl+C. Verified in a PTY.
-- **Next Step:** Stage 4/6 — background driver installation: `check_all()`,
-  `install_all_async()`, download progress in the log, captured installer
-  output, completion event over an mpsc channel.
+- **Done:** Stage 4/6 — the drivers API is now `check_all()` + `install_all_async()`.
+  Installation runs on a blocking thread, streams the Npcap download with
+  percentage progress in the log, launches the installer **without** `/S`,
+  captures `InfDefaultInstall` stdout/stderr into the log, and reports completion
+  through a tokio mpsc channel so the UI refreshes statuses and unlocks.
+- **Next Step:** Stage 5/6 — UAC gating is already visible; add the real cleanup
+  path: the `Y/N` modal must delete `doip-remote.log` and call the
+  driver-removal stub, with a retry after the log writer is closed on Windows.
 - **Repo state:** branch `main`; the TUI is built stage by stage, each stage is
   committed as `wip: stage N completed`. Server/relay work is postponed.
 

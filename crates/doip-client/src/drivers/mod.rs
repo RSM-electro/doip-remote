@@ -3,9 +3,22 @@
 //! The L2 path needs **Npcap** (packet capture) and a **Microsoft KM-TEST
 //! Loopback Adapter**. Both are Windows-only; other platforms get a stub so the
 //! client can still be built and exercised on Linux.
+//!
+//! Installation is split into a background-friendly API: [`check_all`] probes
+//! the system, while [`install_all_async`] spawns the work on a blocking thread
+//! and reports completion through an mpsc channel. Progress and installer
+//! output are emitted with `tracing`, so they appear both in the log file and in
+//! the TUI log panel.
 
 #[cfg(target_os = "windows")]
-use std::process::{Command, ExitStatus};
+use std::{
+    fs::File,
+    io::{Read, Write},
+    path::{Path, PathBuf},
+    process::{Command, ExitStatus, Stdio},
+};
+
+use tokio::sync::mpsc::UnboundedSender;
 
 /// Installation status of the drivers required for L2 traffic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +37,13 @@ impl DriverStatus {
     }
 }
 
+/// Event sent by the background installer when it finishes.
+#[derive(Debug)]
+pub enum InstallEvent {
+    /// Installation finished; the UI can refresh the statuses and unlock.
+    Finished(Result<(), DriverError>),
+}
+
 /// Errors that can occur while installing the drivers.
 #[derive(Debug, thiserror::Error)]
 #[allow(dead_code)] // Some variants only exist on specific platforms.
@@ -31,6 +51,10 @@ pub enum DriverError {
     /// Driver installation is implemented for Windows only.
     #[error("driver installation is only supported on Windows")]
     UnsupportedPlatform,
+
+    /// The background installation task could not be joined.
+    #[error("driver installation task failed: {0}")]
+    Task(String),
 
     /// The Npcap installer could not be downloaded.
     #[cfg(target_os = "windows")]
@@ -56,7 +80,7 @@ pub enum DriverError {
 /// Checks which drivers are currently installed.
 #[cfg(target_os = "windows")]
 #[must_use]
-pub fn check_drivers() -> DriverStatus {
+pub fn check_all() -> DriverStatus {
     DriverStatus {
         npcap_installed: npcap_installed(),
         loopback_installed: loopback_installed(),
@@ -68,11 +92,59 @@ pub fn check_drivers() -> DriverStatus {
 /// This is a stub on non-Windows platforms: the L2 drivers are Windows-only.
 #[cfg(not(target_os = "windows"))]
 #[must_use]
-pub fn check_drivers() -> DriverStatus {
+pub fn check_all() -> DriverStatus {
     DriverStatus {
         npcap_installed: false,
         loopback_installed: false,
     }
+}
+
+/// Spawns a background task that installs the missing drivers.
+///
+/// Completion (success or failure) is reported through `events`. The caller
+/// should keep the menu locked until [`InstallEvent::Finished`] arrives.
+pub fn install_all_async(events: UnboundedSender<InstallEvent>) {
+    tokio::spawn(async move {
+        let result = match tokio::task::spawn_blocking(install_all_blocking).await {
+            Ok(result) => result,
+            Err(error) => Err(DriverError::Task(error.to_string())),
+        };
+
+        let _ = events.send(InstallEvent::Finished(result));
+    });
+}
+
+/// Blocking installation body; runs on a dedicated thread.
+#[cfg(target_os = "windows")]
+fn install_all_blocking() -> Result<(), DriverError> {
+    let status = check_all();
+    if status.is_all_ok() {
+        tracing::info!("[OK] Все драйверы уже установлены.");
+        return Ok(());
+    }
+
+    if status.npcap_installed {
+        tracing::info!("Npcap уже установлен, пропускаем.");
+    } else {
+        tracing::info!("Npcap не найден. Скачивание установщика с npcap.com...");
+        install_npcap()?;
+    }
+
+    if status.loopback_installed {
+        tracing::info!("Loopback-адаптер уже установлен, пропускаем.");
+    } else {
+        tracing::info!("KM-TEST Loopback Adapter не найден. Запуск установки...");
+        install_loopback()?;
+    }
+
+    Ok(())
+}
+
+/// Blocking installation body; stub outside Windows.
+#[cfg(not(target_os = "windows"))]
+fn install_all_blocking() -> Result<(), DriverError> {
+    tracing::warn!("Установка драйверов поддерживается только на Windows.");
+    Err(DriverError::UnsupportedPlatform)
 }
 
 /// Returns `true` when the current process has administrator privileges.
@@ -89,8 +161,8 @@ pub fn is_admin() -> bool {
 
     Command::new("net")
         .args(["session"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .creation_flags(CREATE_NO_WINDOW)
         .status()
         .map(|status| status.success())
@@ -106,38 +178,6 @@ pub fn is_admin() -> bool {
     false
 }
 
-/// Downloads and installs the missing drivers.
-///
-/// Npcap is downloaded from the official site and installed silently (`/S`).
-/// The KM-TEST Loopback Adapter is installed from `netloop.inf`. Both steps
-/// wait for the installer to finish. On non-Windows platforms this returns
-/// [`DriverError::UnsupportedPlatform`] without side effects.
-#[cfg(target_os = "windows")]
-pub fn install_drivers() -> Result<(), DriverError> {
-    let status = check_drivers();
-    if status.is_all_ok() {
-        return Ok(());
-    }
-
-    if !status.npcap_installed {
-        install_npcap()?;
-    }
-
-    if !status.loopback_installed {
-        install_loopback()?;
-    }
-
-    Ok(())
-}
-
-/// Downloads and installs the missing drivers.
-///
-/// Stub for non-Windows platforms.
-#[cfg(not(target_os = "windows"))]
-pub fn install_drivers() -> Result<(), DriverError> {
-    Err(DriverError::UnsupportedPlatform)
-}
-
 #[cfg(target_os = "windows")]
 const NPCAP_DOWNLOAD_URL: &str = "https://npcap.com/dist/npcap-1.80.exe";
 
@@ -145,10 +185,10 @@ const NPCAP_DOWNLOAD_URL: &str = "https://npcap.com/dist/npcap-1.80.exe";
 const LOOPBACK_MARKERS: [&str; 2] = ["loopback", "km-test"];
 
 #[cfg(target_os = "windows")]
-fn windows_dir() -> std::path::PathBuf {
+fn windows_dir() -> PathBuf {
     std::env::var_os("SystemRoot")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
 }
 
 #[cfg(target_os = "windows")]
@@ -195,24 +235,18 @@ fn contains_loopback_marker(bytes: &[u8]) -> bool {
 
 #[cfg(target_os = "windows")]
 fn install_npcap() -> Result<(), DriverError> {
-    let installer_path = std::env::temp_dir().join("npcap-1.80.exe");
+    let installer = std::env::temp_dir().join("npcap-1.80.exe");
+    download_npcap(&installer)?;
 
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(concat!("doip-remote/", env!("CARGO_PKG_VERSION")))
-        .build()?;
-    let bytes = client
-        .get(NPCAP_DOWNLOAD_URL)
-        .send()?
-        .error_for_status()?
-        .bytes()?;
-    std::fs::write(&installer_path, bytes.as_ref())?;
+    tracing::info!("Запуск установщика Npcap. Следуйте подсказкам мастера...");
+    let status = Command::new(&installer).status();
 
-    // Make sure the downloaded installer is removed even if it cannot start.
-    let status = Command::new(&installer_path).arg("/S").status();
-    let _ = std::fs::remove_file(&installer_path);
+    // The installer is always a temporary file; do not leave it behind.
+    let _ = std::fs::remove_file(&installer);
     let status = status?;
 
     if status.success() {
+        tracing::info!("[OK] Установщик Npcap завершился успешно.");
         Ok(())
     } else {
         Err(DriverError::InstallerFailed {
@@ -223,21 +257,87 @@ fn install_npcap() -> Result<(), DriverError> {
 }
 
 #[cfg(target_os = "windows")]
+fn download_npcap(destination: &Path) -> Result<(), DriverError> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(concat!("doip-remote/", env!("CARGO_PKG_VERSION")))
+        .build()?;
+    let mut response = client.get(NPCAP_DOWNLOAD_URL).send()?.error_for_status()?;
+
+    let total = response.content_length();
+    let mut file = File::create(destination)?;
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut downloaded: u64 = 0;
+    let mut next_percent: u64 = 10;
+
+    loop {
+        let read = response.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+
+        file.write_all(&buffer[..read])?;
+        downloaded += read as u64;
+
+        match total {
+            Some(total) if total > 0 => {
+                let percent = downloaded * 100 / total;
+                if percent >= next_percent || downloaded == total {
+                    tracing::info!("Загрузка Npcap: {percent}% ({downloaded} из {total} байт)");
+                    next_percent = (percent / 10 + 1) * 10;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    file.flush()?;
+    tracing::info!(
+        "[OK] Npcap скачан ({} байт): {}",
+        downloaded,
+        destination.display()
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
 fn install_loopback() -> Result<(), DriverError> {
     let inf_default_install = windows_dir().join("System32").join("InfDefaultInstall.exe");
     let netloop_inf = windows_dir().join("INF").join("netloop.inf");
 
-    let status = Command::new(inf_default_install)
-        .arg(netloop_inf)
-        .status()?;
+    tracing::info!(
+        "Запуск {} {}",
+        inf_default_install.display(),
+        netloop_inf.display()
+    );
 
-    if status.success() {
+    let output = Command::new(&inf_default_install)
+        .arg(&netloop_inf)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()?;
+
+    log_installer_output("InfDefaultInstall", &output.stdout);
+    log_installer_output("InfDefaultInstall (stderr)", &output.stderr);
+
+    if output.status.success() {
+        tracing::info!("[OK] KM-TEST Loopback Adapter установлен.");
         Ok(())
     } else {
         Err(DriverError::InstallerFailed {
             name: "Loopback",
-            status,
+            status: output.status,
         })
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn log_installer_output(source: &str, bytes: &[u8]) {
+    for line in String::from_utf8_lossy(bytes)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        tracing::info!("{source}: {line}");
     }
 }
 
@@ -281,7 +381,7 @@ mod tests {
     #[cfg(not(target_os = "windows"))]
     #[test]
     fn non_windows_check_is_a_stub() {
-        let status = check_drivers();
+        let status = check_all();
 
         assert!(!status.npcap_installed);
         assert!(!status.loopback_installed);
@@ -289,10 +389,19 @@ mod tests {
     }
 
     #[cfg(not(target_os = "windows"))]
-    #[test]
-    fn non_windows_install_reports_unsupported_platform() {
-        let error = install_drivers().expect_err("installation must be unsupported");
+    #[tokio::test]
+    async fn non_windows_install_reports_unsupported_platform() {
+        let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        install_all_async(events);
 
-        assert!(matches!(error, DriverError::UnsupportedPlatform));
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), receiver.recv())
+            .await
+            .expect("install event timed out")
+            .expect("install channel closed");
+
+        match event {
+            InstallEvent::Finished(Err(DriverError::UnsupportedPlatform)) => {}
+            other => panic!("unexpected install event: {other:?}"),
+        }
     }
 }
