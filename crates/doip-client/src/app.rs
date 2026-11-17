@@ -97,6 +97,9 @@ pub struct App {
     pub log_scroll: u16,
     /// Pending Diag session-code input, if the input popup is open.
     pub diag_input: Option<String>,
+    /// Remove the log file once the writer is closed (needed on Windows, where
+    /// an open file cannot be deleted).
+    pub delete_log_on_exit: bool,
     /// Set when the event loop should exit.
     pub should_quit: bool,
 }
@@ -117,6 +120,7 @@ impl App {
             logs,
             log_scroll: 0,
             diag_input: None,
+            delete_log_on_exit: false,
             should_quit: false,
         }
     }

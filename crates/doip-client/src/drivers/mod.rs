@@ -77,6 +77,14 @@ pub enum DriverError {
     },
 }
 
+/// Removes the L2 drivers.
+///
+/// Not implemented yet: this is the stub the cleanup menu item calls before
+/// deleting the log file.
+pub fn remove_all() {
+    tracing::warn!("Удаление драйверов пока не реализовано (заглушка).");
+}
+
 /// Checks which drivers are currently installed.
 #[cfg(target_os = "windows")]
 #[must_use]

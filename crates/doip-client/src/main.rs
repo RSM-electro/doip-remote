@@ -52,6 +52,19 @@ async fn main() -> ExitCode {
     let result = run(&mut terminal, &mut app).await;
     tui::restore();
 
+    // The log writer must be closed before the file can be removed on Windows.
+    let delete_log = app.delete_log_on_exit;
+    drop(_log_guard);
+
+    if delete_log {
+        let path = logging::log_file_path();
+        if let Err(error) = std::fs::remove_file(&path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("Не удалось удалить лог {}: {error}", path.display());
+            }
+        }
+    }
+
     match result {
         Ok(()) => {
             println!("{}", "До встречи!".bright_black());
@@ -286,13 +299,29 @@ fn accept_diag_code(input: &str) {
     }
 }
 
-/// Handles the destructive menu entry.
+/// Handles the destructive menu entry: removes the drivers and the log file,
+/// then stops the application.
 ///
-/// Stage 4 only stops the application; stage 5 adds the actual driver and log
-/// removal.
+/// On Windows the log file cannot be deleted while `tracing-appender` still has
+/// it open, so the removal is retried after the writer guard is dropped in
+/// `main`.
 fn confirm_cleanup(app: &mut App) {
     app.show_confirm_delete = false;
-    warn!("Удаление драйверов и логов (заглушка) и выход...");
+
+    drivers::remove_all();
+
+    let path = logging::log_file_path();
+    match std::fs::remove_file(&path) {
+        Ok(()) => info!("[OK] Лог удалён: {}", path.display()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            info!("Лог уже отсутствует: {}", path.display());
+        }
+        Err(error) => {
+            warn!("Не удалось удалить лог сейчас: {error}. Он будет удалён при выходе.");
+            app.delete_log_on_exit = true;
+        }
+    }
+
     app.should_quit = true;
 }
 
