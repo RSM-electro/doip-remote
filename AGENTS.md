@@ -10,12 +10,11 @@ and record important architecture decisions as they are made.
 
 - **Date:** 2026-11-17
 - **Phase:** Ratatui dashboard migration (stages 1-6) — in progress.
-- **Done:** Stage 1/6 — dependencies swapped (`inquire` removed; `ratatui 0.26`,
-  `crossterm 0.27`, `tracing-appender 0.2` added) and logging now goes both to
-  `doip-remote.log` next to the executable and to an in-memory ring buffer
-  (`src/logging.rs`) that the future TUI will render.
-- **Next Step:** Stage 2/6 — `AppState` in `src/app.rs` (menu index, focus,
-  driver/admin/connection statuses, logs buffer, scroll).
+- **Done:** Stage 2/6 — `src/app.rs` holds the dashboard state (`App`,
+  `Focus`, `ConnectionStatus`, `MenuItem`) with menu navigation, focus toggle,
+  log scrolling and driver flags; covered by 8 unit tests.
+- **Next Step:** Stage 3/6 — ratatui renderer and event loop: terminal setup,
+  panic/Ctrl+C restore, header/menu/status/log layout, Tab and PageUp/PageDown.
 - **Repo state:** branch `main`; the TUI is built stage by stage, each stage is
   committed as `wip: stage N completed`. Server/relay work is postponed.
 
