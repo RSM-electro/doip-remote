@@ -9,16 +9,15 @@ and record important architecture decisions as they are made.
 ## Current Status (обновляй этот блок каждый день)
 
 - **Date:** 2026-11-17
-- **Phase:** Ratatui dashboard migration (stages 1-6) — in progress.
-- **Done:** Stage 5/6 — UAC handling is complete: the admin status is shown in
-  the panel, installation without rights is refused with a log message, and the
-  `Y/N` cleanup modal deletes `doip-remote.log` and calls the driver-removal
-  stub. Log deletion is retried after the writer guard is dropped, which is
-  required on Windows. Verified in a PTY on Linux (modal, cancel, deletion).
-- **Next Step:** Stage 6/6 — `--mock` mode (green dashboard, connected status)
-  and the final end-to-end verification, docs and commit.
-- **Repo state:** branch `main`; the TUI is built stage by stage, each stage is
-  committed as `wip: stage N completed`. Server/relay work is postponed.
+- **Phase:** Ratatui dashboard migration (stages 1-6) — complete and committed.
+- **Done:** Stage 6/6 — `--mock` mode and final verification. The client is now a
+  ratatui dashboard with a menu, dot-aligned status panel, scrolling log console,
+  background driver installation, UAC gate and a cleanup modal. `inquire` is gone.
+- **Next Step:** Validate on real **Windows 11**: TUI rendering, driver
+  detection/installation, UAC, and log deletion (full checklist below).
+  Server/relay work (`doip-server`) remains postponed.
+- **Repo state:** branch `main`; stages 1-5 are committed as
+  `wip: stage N completed`, stage 6 as the final dashboard commit.
 
 ## Architecture
 
@@ -34,7 +33,7 @@ and record important architecture decisions as they are made.
 - **Crypto (planned):** X25519 key agreement + ChaCha20-Poly1305 AEAD. Not
   implemented yet; `token` and `key` in session codes are currently random
   placeholders, not negotiated secrets.
-- **UI:** terminal CLI built with `inquire`; no WebView2.
+- **UI:** ratatui dashboard (crossterm backend); no WebView2, no `inquire`.
 - **Roles:** `Car` (agent next to the vehicle) and `Diag` (remote technician).
 
 ## Workspace layout
@@ -43,9 +42,13 @@ and record important architecture decisions as they are made.
 doip-remote/
 ├── crates/
 │   ├── doip-core/     # SessionCode, Role, errors, session-code tests
-│   └── doip-client/   # Interactive terminal client (binary)
+│   └── doip-client/   # Interactive ratatui client (binary)
 │       └── src/
-│           ├── main.rs        # Menu, status rendering, CLI flows
+│           ├── main.rs        # Event loop, menu actions, install events
+│           ├── app.rs         # App state, menu items, focus, scroll
+│           ├── ui.rs          # ratatui layout, status rows, modals
+│           ├── tui.rs         # Terminal init/restore, panic hook, key reader
+│           ├── logging.rs     # File + in-memory log layers
 │           └── drivers/mod.rs # Npcap/Loopback detection and installation
 ├── .github/workflows/ # CI: build + test on Ubuntu and Windows
 ├── Cargo.toml         # Cargo workspace
@@ -81,30 +84,45 @@ driver flow is validated.
 - Parser ignores whitespace anywhere, so codes pasted from wrapped terminal
   output work. Missing `l`/`p`/`v` use defaults. Required fields must be
   non-empty; port `0` is rejected.
-- Current CLI uses `server = "auto"` as a placeholder until the relay address is
+- The client uses `server = "auto"` as a placeholder until the relay address is
   agreed.
 
-## Current CLI behavior
+## Current TUI behavior
 
-- Banner: `=== Rust DoIP Remote v0.1.0 ===`.
-- **Startup driver check** (before the menu):
+- **Layout:** header (`=== DoIP Remote ===` plus key hints), middle row split
+  70/30 into the menu and the dot-aligned status panel, bottom `[ ЛОГИ ]`
+  console. Modals are drawn on top.
+- **Startup driver check** (before the first frame):
   - Windows: Npcap is detected via
     `%SystemRoot%\System32\Npcap\wpcap.dll`; Loopback is detected by searching
     adapter name/description for `Loopback`/`KM-TEST` via `Get-NetAdapter`
-    (`netsh` fallback).
-  - Linux/non-Windows: stub returning `false`/`false`.
-  - All present → green `[OK] Все драйверы установлены (Npcap, Loopback).`
-  - Missing → red list `[!] ВНИМАНИЕ: Отсутствуют драйверы: ...` plus hints.
-- Menu: Car / Diag / **Install drivers** / Cleanup / Exit.
-- Install (Windows): downloads Npcap 1.80 from the official URL to the temp
-  directory, runs it with `/S`, waits, then runs
-  `InfDefaultInstall.exe %SystemRoot%\INF\netloop.inf` and waits. Afterwards the
-  driver status is checked again and reprinted. On Linux this prints a stub.
-- Car asks for the vehicle IP (empty = auto), generates a framed green
-  `DT1-...` code, then shows the connection-wait stub.
-- Diag prompts for a code, prints `Целевой IP авто`, `Порт DoIP` and the relay
-  server, then shows the connection-wait stub.
-- Cleanup prints `[STUB] Removing drivers...` and returns to the menu.
+    (`netsh` fallback). Admin rights are probed with `net session`.
+  - Linux/non-Windows: stub returning `false`/`false`; admin is `false`.
+- **Status panel:** `Права Админа` (green `[OK]` / yellow `[НЕТ]`), `Npcap` and
+  `Loopback` (green `[OK]` / red `[НЕТ]`), `Соединение` (red `[ОТКЛЮЧЕНО]` /
+  green `[ЕСТЬ КОНТАКТ ✓]`). The connection is always disconnected except in
+  `--mock` mode.
+- **Menu:** Install / Car / Diag / Cleanup (red) / Exit.
+- **Navigation:** `↑`/`↓` move (or scroll logs), `Enter` activates, `Tab`
+  toggles menu/log focus, `PageUp`/`PageDown` scroll the log panel, `Ctrl+C`
+  quits. `Esc` closes a popup; in the menu it quits.
+- **Logs:** written to `doip-remote.log` next to the executable and mirrored into
+  the panel by a custom `tracing` layer (ring buffer, 1000 lines). Levels are
+  colour-coded.
+- **Install (Windows):** a background task streams the Npcap 1.80 download with
+  percentage progress in the log, runs the installer **without** `/S`, captures
+  `InfDefaultInstall.exe %SystemRoot%\INF\netloop.inf` stdout/stderr into the
+  log, then sends a completion event. The menu is locked meanwhile and statuses
+  refresh afterwards. Without admin rights the action only logs an instruction
+  to restart as Administrator.
+- **Car:** generates a `DT1-...` code (server `"auto"`) and writes it to the log.
+- **Diag:** opens a popup; typed/pasted code is parsed on `Enter`, and the
+  target IP, DoIP port and relay server are logged.
+- **Cleanup:** opens a `Y/N` confirmation popup. `Y` calls the driver-removal
+  stub, deletes `doip-remote.log` and exits; on Windows the deletion is retried
+  after the log writer is dropped.
+- **`--mock`:** forces admin/driver/connection statuses green so the dashboard
+  can be previewed on Linux.
 - Networking and driver removal are **stubs**; driver detection/installation is
   real only on Windows.
 
@@ -116,6 +134,7 @@ source "$HOME/.cargo/env"   # if cargo is not on PATH
 cargo build --workspace
 cargo test --workspace
 cargo run -p doip-client
+cargo run -p doip-client -- --mock   # green demo dashboard
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 
@@ -128,14 +147,17 @@ cargo clippy -p doip-client --all-targets --target x86_64-pc-windows-msvc -- -D 
 ## Last verification (2026-11-17)
 
 - `cargo build --workspace` — OK.
-- `cargo test --workspace` — 17 `doip-core` + 4 `doip-client` tests + 1 doctest,
+- `cargo test --workspace` — 17 `doip-client` + 17 `doip-core` tests + 1 doctest,
   all passing.
 - `cargo clippy --workspace --all-targets -- -D warnings` — clean.
 - `cargo fmt --all --check` and `cargo doc` with warnings denied — clean.
 - Windows target code: `cargo check`/`clippy` for
   `x86_64-pc-windows-msvc` — clean (compile only, not runtime-tested).
-- Linux PTY run: red missing-driver status, Install menu stub, menu navigation
-  and exit — OK.
+- Linux PTY runs — OK: red status dashboard; menu navigation; Tab/PgUp/PgDn log
+  focus and scrolling; Car code generation; Diag popup and parse-error log;
+  Install admin gate; cleanup modal (cancel + confirm, log file deleted);
+  `--mock` all-green dashboard with `ЕСТЬ КОНТАКТ`; Ctrl+C restores the
+  alternate screen, cursor and raw mode.
 - Actual driver detection/installation on real Windows 11 is **not yet tested**.
 
 ## Environment notes
@@ -149,6 +171,8 @@ cargo clippy -p doip-client --all-targets --target x86_64-pc-windows-msvc -- -D 
 - Workspace `rust-version` is `1.89`; CI uses the stable channel.
 - `reqwest` is a Windows-only target dependency; Linux builds do not compile it.
   Driver installation requires administrator rights on Windows.
+- TUI stack: `ratatui 0.26` + `crossterm 0.27`; logs use `tracing-appender 0.2`.
+  `inquire` was removed in stage 1.
 
 ## Conventions
 
@@ -167,15 +191,22 @@ Server/relay work is **postponed**. The next milestone is validating the client
 and its driver flow on real Windows 11:
 
 - [ ] `cargo build --workspace` and `cargo test --workspace` on Windows 11.
-- [ ] Run as a normal user without Npcap/Loopback: confirm the red status.
-- [ ] Install drivers from the menu as administrator; check UAC behaviour and
-      installer exit codes.
+- [ ] Confirm the dashboard renders correctly in Windows Terminal (colours,
+      borders, Cyrillic, `✓`).
+- [ ] Run as a normal user without Npcap/Loopback: confirm the yellow admin
+      status, red driver statuses and the admin warning on Install.
+- [ ] Install drivers from the menu as administrator; follow the interactive
+      Npcap wizard and check UAC behaviour and installer exit codes.
+- [ ] Confirm download progress and `InfDefaultInstall` output appear in the log
+      panel and in `doip-remote.log`.
 - [ ] Confirm Npcap appears at `%SystemRoot%\System32\Npcap\wpcap.dll`.
 - [ ] Confirm the KM-TEST adapter appears and is found by `Get-NetAdapter`.
 - [ ] Confirm the status turns green after installation without a restart.
 - [ ] Check detection on a localized Windows install (`Get-NetAdapter`/`netsh`
       output may be localized; adapter names/markers should still match).
-- [ ] Test failure paths: declined UAC, missing `netloop.inf`, download error.
+- [ ] Test failure paths: declined UAC, canceled Npcap wizard, missing
+      `netloop.inf`, download error, cleanup `Y/N` and log deletion.
+- [ ] Confirm Ctrl+C and window close restore the console (no broken prompt).
 - [ ] Only after this is green, resume `doip-server` work.
 
 ## Postponed: relay/server design questions

@@ -20,7 +20,6 @@ pub enum Focus {
 
 /// State of the diagnostic tunnel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // `Connected` is used by the `--mock` mode and later by the relay.
 pub enum ConnectionStatus {
     /// No tunnel has been established.
     Disconnected,
@@ -177,6 +176,17 @@ impl App {
     pub fn drivers_ready(&self) -> bool {
         self.npcap_status && self.loopback_status
     }
+
+    /// Pretends that everything is installed and connected.
+    ///
+    /// Used by the `--mock` command-line flag to preview the green dashboard on
+    /// a development machine.
+    pub fn enable_mock(&mut self) {
+        self.admin_status = true;
+        self.npcap_status = true;
+        self.loopback_status = true;
+        self.connection_status = ConnectionStatus::Connected;
+    }
 }
 
 #[cfg(test)]
@@ -254,5 +264,17 @@ mod tests {
 
         app.set_driver_status(true, true);
         assert!(app.drivers_ready());
+    }
+
+    #[test]
+    fn mock_mode_turns_everything_green() {
+        let mut app = app();
+        app.enable_mock();
+
+        assert!(app.admin_status);
+        assert!(app.npcap_status);
+        assert!(app.loopback_status);
+        assert!(app.drivers_ready());
+        assert_eq!(app.connection_status, ConnectionStatus::Connected);
     }
 }

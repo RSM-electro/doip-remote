@@ -31,15 +31,24 @@ const RELAY_SERVER: &str = "auto";
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    let mock = std::env::args().skip(1).any(|arg| arg == "--mock");
+
     let logs = Arc::new(Mutex::new(VecDeque::new()));
     let _log_guard = logging::init(Arc::clone(&logs));
 
     let mut app = App::new(logs);
-    app.admin_status = drivers::is_admin();
-    let status = drivers::check_all();
-    app.set_driver_status(status.npcap_installed, status.loopback_installed);
+    let drivers_ok = if mock {
+        app.enable_mock();
+        info!("[OK] Mock-режим: все статусы эмулируются зелёными.");
+        true
+    } else {
+        app.admin_status = drivers::is_admin();
+        let status = drivers::check_all();
+        app.set_driver_status(status.npcap_installed, status.loopback_installed);
+        status.is_all_ok()
+    };
 
-    log_startup_status(&app, status);
+    log_startup_status(&app, drivers_ok);
 
     let mut terminal = match tui::init() {
         Ok(terminal) => terminal,
@@ -77,7 +86,7 @@ async fn main() -> ExitCode {
     }
 }
 
-fn log_startup_status(app: &App, status: drivers::DriverStatus) {
+fn log_startup_status(app: &App, drivers_ok: bool) {
     info!(
         "Логирование запущено, файл: {}",
         logging::log_file_path().display()
@@ -95,7 +104,7 @@ fn log_startup_status(app: &App, status: drivers::DriverStatus) {
         ready_tag(app.loopback_status)
     );
 
-    if status.is_all_ok() {
+    if drivers_ok {
         info!("[OK] Все драйверы установлены.");
     } else {
         warn!("Не все драйверы установлены: установите их из меню.");

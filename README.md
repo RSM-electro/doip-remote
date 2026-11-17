@@ -7,10 +7,10 @@ DoIP (Diagnostics over Internet Protocol, ISO 13400). A vehicle-side agent and a
 diagnostic client exchange a compact, copy-pasteable session code to establish a
 tunnel — no VPN setup and no vendor-specific software required.
 
-> **Status (2026-11-17):** Client focus. The Step 1 skeleton is complete; the
-> client now detects Npcap/Loopback drivers at startup and can install missing
-> drivers from the menu on Windows. Next: validate the build and driver flow on
-> Windows 11. Server/relay work is postponed.
+> **Status (2026-11-17):** The client now uses a full ratatui dashboard: menu,
+> live status panel and a scrolling log console. Driver installation runs in the
+> background with progress in the log. Next: validate the build and driver flow
+> on Windows 11. Server/relay work is postponed.
 > See [AGENTS.md](AGENTS.md) for the full project context and next steps.
 
 ## Highlights
@@ -18,9 +18,11 @@ tunnel — no VPN setup and no vendor-specific software required.
 - **Universal** — works with any DoIP-capable vehicle or ECU.
 - **Portable session codes** — a single `DT1-...` string carries everything the
   diagnostic side needs.
+- **Dashboard UI** — ratatui terminal interface with a live driver/connection
+  status panel and a scrolling log console.
 - **Windows-ready driver checks** — detects Npcap and the KM-TEST Loopback
-  Adapter, and installs them on demand.
-- **Single binary client** — a friendly terminal UI, no configuration files.
+  Adapter, and installs them in the background.
+- **Single binary client** — no configuration files.
 - **Rust** — memory safety, predictable performance and easy cross-compilation.
 
 ## Workspace layout
@@ -29,8 +31,14 @@ tunnel — no VPN setup and no vendor-specific software required.
 doip-remote/
 ├── crates/
 │   ├── doip-core/     # Shared types: session codes, roles, errors
-│   └── doip-client/   # Interactive command-line client
-│       └── src/drivers/ # Driver detection and installation
+│   └── doip-client/   # Interactive terminal client
+│       └── src/
+│           ├── main.rs        # Event loop and menu actions
+│           ├── app.rs         # Dashboard state
+│           ├── ui.rs          # ratatui rendering
+│           ├── tui.rs         # Terminal setup/restore and key reader
+│           ├── logging.rs     # File + in-memory log routing
+│           └── drivers/       # Driver detection and installation
 ├── .github/workflows/ # CI (Linux + Windows)
 ├── Cargo.toml         # Cargo workspace
 └── rust-toolchain.toml
@@ -52,22 +60,50 @@ cargo build --workspace
 
 ```sh
 cargo run -p doip-client
+
+# Preview the fully green dashboard (admin, drivers and connection emulated)
+cargo run -p doip-client -- --mock
 ```
 
-The client opens an interactive menu:
+The dashboard is split into a header, a menu and status panel, and a log
+console at the bottom:
 
-1. **Я рядом с машиной (Car)** — generates a new `DT1-...` session code.
-2. **Я диагност (Diag)** — accepts a session code and shows the target vehicle.
-3. **Установить драйверы (Install)** — downloads and installs missing drivers
-   (Windows; requires administrator rights).
-4. **Удалить драйверы (Очистка)** — driver cleanup (stub for now).
-5. **Выход** — quit.
+```
+┌ Меню ──────────────────────────────┐┌ Статусы ────────────────────┐
+│> Установить драйверы               ││ Права Админа........... [OK] │
+│  Я рядом с машиной (Car)           ││ Npcap.................. [OK] │
+│  Я диагност (Diag)                 ││ Loopback............... [OK] │
+│  Завершить диагностику с удалением ││ Соединение.... [ЕСТЬ КОНТАКТ]│
+│  Завершить диагностику             ││                              │
+└────────────────────────────────────┘└──────────────────────────────┘
+┌ [ ЛОГИ ] ───────────────────────────────────────────────────────────┐
+```
 
-Driver detection runs automatically at startup: green when Npcap and the
-KM-TEST Loopback Adapter are present, red with the missing list otherwise.
-On Linux both checks are stubbed as missing. Networking and driver cleanup are
-still stubs; the menu already exercises the real session-code generator/parser
-and the Windows driver flow.
+Menu entries:
+
+1. **Установить драйверы** — downloads and installs missing drivers in the
+   background (Windows; requires administrator rights).
+2. **Я рядом с машиной (Car)** — generates a new `DT1-...` session code and
+   writes it to the log.
+3. **Я диагност (Diag)** — opens a popup for pasting a session code.
+4. **Завершить диагностику с удалением драйверов и логов** (red) — asks for
+   confirmation, then removes drivers and `doip-remote.log` and exits.
+5. **Завершить диагностику** — exits.
+
+Keyboard:
+
+| Key | Action |
+| --- | ------ |
+| `↑` / `↓` | Move the menu selection (or scroll logs) |
+| `Enter` | Activate the selected entry |
+| `Tab` | Switch focus between the menu and the log console |
+| `PageUp` / `PageDown` | Scroll the log console (logs focused) |
+| `Ctrl+C` | Quit immediately, restoring the terminal |
+
+Logs are written both to `doip-remote.log` (next to the executable) and to the
+console. The terminal is always restored on exit, on `Ctrl+C` and on panic.
+Networking and driver removal are still stubs; the session-code generator/parser
+and the Windows driver flow are real.
 
 ## Driver checks
 
@@ -76,11 +112,14 @@ and the Windows driver flow.
 | Npcap | `%SystemRoot%\System32\Npcap\wpcap.dll` exists |
 | Loopback | Adapter name/description contains `Loopback` or `KM-TEST` (`Get-NetAdapter`, `netsh` fallback) |
 
-The **Install** menu item downloads the Npcap installer from
-`npcap.com/dist/npcap-1.80.exe` and runs it silently (`/S`), then installs the
-Loopback adapter from `%SystemRoot%\INF\netloop.inf` via
-`InfDefaultInstall.exe`. Both steps wait for completion; the status is checked
-again afterwards. Driver installation is Windows-only.
+The **Install** menu item runs in the background: it downloads the Npcap
+installer from `npcap.com/dist/npcap-1.80.exe` with percentage progress in the
+log, runs the installer **without** `/S` so the user can follow the wizard, then
+installs the Loopback adapter from `%SystemRoot%\INF\netloop.inf` via
+`InfDefaultInstall.exe` and forwards its stdout/stderr to the log. The menu is
+locked until the installation finishes, then the statuses are refreshed.
+Driver installation is Windows-only. On Linux the client reports that the
+drivers are missing and refuses to install; use `--mock` to preview the green UI.
 
 ## Session code format
 
