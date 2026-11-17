@@ -16,6 +16,15 @@ use ratatui::{
 const ACCENT: Color = Color::Cyan;
 const MUTED: Color = Color::DarkGray;
 
+/// Keys shown in the header together with the action they perform.
+const HOTKEYS: [(&str, &str); 5] = [
+    ("↑/↓", "меню"),
+    ("Enter", "выбор"),
+    ("Tab", "логи"),
+    ("PgUp/PgDn", "прокрутка"),
+    ("Ctrl+C", "выход"),
+];
+
 /// Draws the whole dashboard.
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.size();
@@ -53,13 +62,30 @@ fn draw_header(frame: &mut Frame, area: Rect) {
         "=== DoIP Remote ===",
         Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
     ));
-    let hints = Line::from(Span::styled(
-        "↑/↓ — меню • Enter — выбор • Tab — логи • PgUp/PgDn — прокрутка • Ctrl+C — выход",
-        Style::default().fg(MUTED),
-    ));
+    let hints = hotkeys_line();
 
     let header = Paragraph::new(vec![title, hints]).alignment(Alignment::Center);
     frame.render_widget(header, area);
+}
+
+/// Builds the hotkey hint row: yellow key caps, cyan separators and actions.
+fn hotkeys_line() -> Line<'static> {
+    let key_style = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    let text_style = Style::default().fg(Color::Cyan);
+
+    let mut spans = Vec::with_capacity(HOTKEYS.len() * 3);
+
+    for (index, (key, action)) in HOTKEYS.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(" • ", text_style));
+        }
+        spans.push(Span::styled(format!("[{key}]"), key_style));
+        spans.push(Span::styled(format!(" - {action}"), text_style));
+    }
+
+    Line::from(spans)
 }
 
 fn draw_menu(frame: &mut Frame, area: Rect, app: &App) {
@@ -321,6 +347,28 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hotkeys_use_yellow_keys_and_cyan_descriptions() {
+        let line = hotkeys_line();
+
+        assert_eq!(line.spans[0].content, "[↑/↓]");
+        assert_eq!(line.spans[0].style.fg, Some(Color::Yellow));
+        assert_eq!(line.spans[1].content, " - меню");
+        assert_eq!(line.spans[1].style.fg, Some(Color::Cyan));
+        assert_eq!(line.spans[2].content, " • ");
+        assert_eq!(line.spans[2].style.fg, Some(Color::Cyan));
+
+        let plain: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(
+            plain,
+            "[↑/↓] - меню • [Enter] - выбор • [Tab] - логи • [PgUp/PgDn] - прокрутка • [Ctrl+C] - выход"
+        );
+    }
 
     #[test]
     fn visible_logs_are_bottom_aligned_and_padded() {

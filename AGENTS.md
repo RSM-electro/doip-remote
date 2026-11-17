@@ -17,7 +17,8 @@ and record important architecture decisions as they are made.
   detection/installation, UAC, and log deletion (full checklist below).
   Server/relay work (`doip-server`) remains postponed.
 - **Repo state:** branch `main`; stages 1-5 are committed as
-  `wip: stage N completed`, stage 6 as the final dashboard commit.
+  `wip: stage N completed`, stage 6 as the final dashboard commit, followed by
+  `fix(ui): improve hotkeys readability with yellow/cyan colors`.
 
 ## Architecture
 
@@ -92,6 +93,9 @@ driver flow is validated.
 - **Layout:** header (`=== DoIP Remote ===` plus key hints), middle row split
   70/30 into the menu and the dot-aligned status panel, bottom `[ ЛОГИ ]`
   console. Modals are drawn on top.
+- **Key hints:** built from the `HOTKEYS` table in `ui.rs` and rendered as
+  `[ключ] - действие • ...`; key caps are bold yellow, separators and action
+  descriptions are cyan so the row stays readable on a dark terminal.
 - **Startup driver check** (before the first frame):
   - Windows: Npcap is detected via
     `%SystemRoot%\System32\Npcap\wpcap.dll`; Loopback is detected by searching
@@ -147,7 +151,7 @@ cargo clippy -p doip-client --all-targets --target x86_64-pc-windows-msvc -- -D 
 ## Last verification (2026-11-17)
 
 - `cargo build --workspace` — OK.
-- `cargo test --workspace` — 17 `doip-client` + 17 `doip-core` tests + 1 doctest,
+- `cargo test --workspace` — 18 `doip-client` + 17 `doip-core` tests + 1 doctest,
   all passing.
 - `cargo clippy --workspace --all-targets -- -D warnings` — clean.
 - `cargo fmt --all --check` and `cargo doc` with warnings denied — clean.
@@ -157,7 +161,8 @@ cargo clippy -p doip-client --all-targets --target x86_64-pc-windows-msvc -- -D 
   focus and scrolling; Car code generation; Diag popup and parse-error log;
   Install admin gate; cleanup modal (cancel + confirm, log file deleted);
   `--mock` all-green dashboard with `ЕСТЬ КОНТАКТ`; Ctrl+C restores the
-  alternate screen, cursor and raw mode.
+  alternate screen, cursor and raw mode. The hint row renders bold yellow
+  `[ключ]` caps and cyan descriptions (SGR `38;5;3` / `38;5;6`).
 - Actual driver detection/installation on real Windows 11 is **not yet tested**.
 
 ## Environment notes
