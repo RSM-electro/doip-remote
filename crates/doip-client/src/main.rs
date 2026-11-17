@@ -1,9 +1,12 @@
 //! Interactive terminal client for `doip-remote`.
 
+mod drivers;
+
 use std::{fmt, process::ExitCode};
 
 use colored::Colorize;
 use doip_core::{Role, SessionCode};
+use drivers::{DriverError, DriverStatus};
 use inquire::{InquireError, Select, Text};
 
 /// Placeholder relay address until the networking layer is implemented.
@@ -14,12 +17,19 @@ const RELAY_SERVER: &str = "auto";
 enum MenuAction {
     Car,
     Diag,
+    Install,
     Cleanup,
     Exit,
 }
 
 impl MenuAction {
-    const ALL: [Self; 4] = [Self::Car, Self::Diag, Self::Cleanup, Self::Exit];
+    const ALL: [Self; 5] = [
+        Self::Car,
+        Self::Diag,
+        Self::Install,
+        Self::Cleanup,
+        Self::Exit,
+    ];
 }
 
 impl fmt::Display for MenuAction {
@@ -27,6 +37,7 @@ impl fmt::Display for MenuAction {
         formatter.write_str(match self {
             Self::Car => "Я рядом с машиной (Car)",
             Self::Diag => "Я диагност (Diag)",
+            Self::Install => "Установить драйверы (Install)",
             Self::Cleanup => "Удалить драйверы (Очистка)",
             Self::Exit => "Выход",
         })
@@ -37,16 +48,19 @@ impl fmt::Display for MenuAction {
 async fn main() -> ExitCode {
     init_tracing();
     print_banner();
-    check_drivers();
 
-    let status = run_menu();
+    let mut driver_status = drivers::check_drivers();
+    print_driver_status(&driver_status);
+    println!();
+
+    let status = run_menu(&mut driver_status).await;
 
     println!();
     println!("{}", "До встречи!".bright_black());
     status
 }
 
-fn run_menu() -> ExitCode {
+async fn run_menu(driver_status: &mut DriverStatus) -> ExitCode {
     loop {
         let action = match Select::new("Главное меню:", MenuAction::ALL.to_vec())
             .with_help_message("↑/↓ — навигация, Enter — выбор, Esc — выход")
@@ -66,6 +80,10 @@ fn run_menu() -> ExitCode {
         let result = match action {
             MenuAction::Car => handle_car(),
             MenuAction::Diag => handle_diag(),
+            MenuAction::Install => {
+                handle_install(driver_status).await;
+                Ok(())
+            }
             MenuAction::Cleanup => {
                 handle_cleanup();
                 Ok(())
@@ -145,6 +163,31 @@ fn handle_diag() -> Result<(), InquireError> {
     }
 }
 
+/// Downloads and installs missing drivers, then refreshes the status.
+async fn handle_install(driver_status: &mut DriverStatus) {
+    println!();
+    println!("Скачивание и установка драйверов...");
+
+    // On non-Windows builds `UnsupportedPlatform` is the only error variant,
+    // so the catch-all arm is unreachable there.
+    #[allow(unreachable_patterns)]
+    match tokio::task::spawn_blocking(drivers::install_drivers).await {
+        Ok(Ok(())) => println!("{}", "[OK] Установка завершена. Проверьте статус.".green()),
+        Ok(Err(DriverError::UnsupportedPlatform)) => {
+            println!(
+                "{}",
+                "[STUB] Установка драйверов поддерживается только на Windows.".yellow()
+            );
+        }
+        Ok(Err(error)) => eprintln!("{} {error}", "[ERROR]".red().bold()),
+        Err(error) => eprintln!("{} install task failed: {error}", "[ERROR]".red().bold()),
+    }
+
+    *driver_status = drivers::check_drivers();
+    println!();
+    print_driver_status(driver_status);
+}
+
 /// Driver cleanup placeholder.
 fn handle_cleanup() {
     println!();
@@ -166,10 +209,40 @@ fn print_banner() {
     println!();
 }
 
-fn check_drivers() {
+/// Prints the current driver status above the main menu.
+fn print_driver_status(status: &DriverStatus) {
+    if status.is_all_ok() {
+        println!(
+            "{}",
+            "[OK] Все драйверы установлены (Npcap, Loopback).".green()
+        );
+        return;
+    }
+
+    let mut missing = Vec::with_capacity(2);
+    if !status.npcap_installed {
+        missing.push("Npcap");
+    }
+    if !status.loopback_installed {
+        missing.push("Loopback");
+    }
+
     println!(
-        "{} Checking Npcap and Loopback drivers... (stub)",
-        "[OK]".green().bold()
+        "{}",
+        format!("[!] ВНИМАНИЕ: Отсутствуют драйверы: {}", missing.join(", "))
+            .red()
+            .bold()
+    );
+
+    if !status.npcap_installed {
+        println!("    - Npcap (скачать с npcap.com)");
+    }
+    if !status.loopback_installed {
+        println!("    - Microsoft KM-TEST Loopback Adapter (устанавливается через меню)");
+    }
+
+    println!(
+        "    Вы можете установить их через меню (пункт 3 — «Установить драйверы») или вручную из интернета."
     );
 }
 
