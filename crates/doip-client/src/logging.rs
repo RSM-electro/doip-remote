@@ -1,0 +1,191 @@
+//! Logging setup for the terminal UI.
+//!
+//! Every event is written to two sinks:
+//!
+//! * `doip-remote.log` next to the executable (for later inspection);
+//! * an in-memory ring buffer that the TUI renders in the `[ ЛОГИ ]` panel.
+//!
+//! The in-memory mirror is implemented as a custom [`Layer`], so any
+//! `tracing` event emitted anywhere in the client shows up in the dashboard
+//! without extra plumbing.
+
+use std::{
+    collections::VecDeque,
+    fmt,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+};
+
+use tracing::{field::Field, Event, Level, Subscriber};
+use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::{
+    field::Visit,
+    layer::{Context, Layer},
+    prelude::*,
+};
+
+/// Name of the log file written next to the executable.
+pub const LOG_FILE_NAME: &str = "doip-remote.log";
+
+/// Maximum number of lines kept in the in-memory buffer.
+const MAX_BUFFERED_LINES: usize = 1000;
+
+/// Returns the path of `doip-remote.log`, next to the current executable.
+///
+/// Falls back to the current working directory when the executable path is
+/// unavailable.
+#[must_use]
+pub fn log_file_path() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(LOG_FILE_NAME)
+}
+
+/// Initializes the global `tracing` subscriber.
+///
+/// Returns the guard that keeps the file writer alive; it must be held for the
+/// whole lifetime of the application. Returns `None` if a global subscriber was
+/// already installed (for example by a test harness).
+#[must_use]
+pub fn init(logs: Arc<Mutex<VecDeque<String>>>) -> Option<WorkerGuard> {
+    let path = log_file_path();
+    let directory = path.parent().unwrap_or_else(|| Path::new("."));
+    let appender = tracing_appender::rolling::never(directory, LOG_FILE_NAME);
+    let (writer, guard) = tracing_appender::non_blocking(appender);
+
+    let file_layer = tracing_subscriber::fmt::layer()
+        .with_writer(writer)
+        .with_ansi(false)
+        .with_target(false);
+
+    let installed = tracing_subscriber::registry()
+        .with(tracing_subscriber::filter::LevelFilter::INFO)
+        .with(file_layer)
+        .with(UiLayer::new(logs))
+        .try_init()
+        .is_ok();
+
+    installed.then_some(guard)
+}
+
+/// A `tracing` layer that mirrors formatted events into the UI buffer.
+struct UiLayer {
+    logs: Arc<Mutex<VecDeque<String>>>,
+}
+
+impl UiLayer {
+    fn new(logs: Arc<Mutex<VecDeque<String>>>) -> Self {
+        Self { logs }
+    }
+
+    fn push(&self, line: String) {
+        let Ok(mut logs) = self.logs.lock() else {
+            return;
+        };
+
+        if logs.len() >= MAX_BUFFERED_LINES {
+            logs.pop_front();
+        }
+        logs.push_back(line);
+    }
+}
+
+impl<S: Subscriber> Layer<S> for UiLayer {
+    fn on_event(&self, event: &Event<'_>, _context: Context<'_, S>) {
+        let mut visitor = MessageVisitor::default();
+        event.record(&mut visitor);
+
+        let line = format!(
+            "{} {}",
+            level_tag(*event.metadata().level()),
+            visitor.message()
+        );
+        self.push(line);
+    }
+}
+
+/// Extracts the `message` field (or the remaining fields) of an event.
+#[derive(Default)]
+struct MessageVisitor {
+    message: Option<String>,
+    fields: Vec<String>,
+}
+
+impl MessageVisitor {
+    fn message(self) -> String {
+        match (self.message, self.fields.is_empty()) {
+            (Some(message), true) => message,
+            (Some(message), false) => format!("{message} ({})", self.fields.join(", ")),
+            (None, false) => self.fields.join(", "),
+            (None, true) => String::new(),
+        }
+    }
+}
+
+impl Visit for MessageVisitor {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.record(field, value.to_owned());
+    }
+
+    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+        self.record(field, format!("{value:?}"));
+    }
+}
+
+impl MessageVisitor {
+    fn record(&mut self, field: &Field, value: String) {
+        if field.name() == "message" {
+            self.message = Some(value);
+        } else {
+            self.fields.push(format!("{}={value}", field.name()));
+        }
+    }
+}
+
+fn level_tag(level: Level) -> &'static str {
+    match level {
+        Level::ERROR => "[ERROR]",
+        Level::WARN => "[WARN]",
+        Level::INFO => "[INFO]",
+        Level::DEBUG => "[DEBUG]",
+        Level::TRACE => "[TRACE]",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log_file_lives_next_to_the_executable() {
+        let path = log_file_path();
+
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some(LOG_FILE_NAME)
+        );
+    }
+
+    #[test]
+    fn buffer_is_capped() {
+        let logs = Arc::new(Mutex::new(VecDeque::new()));
+        let layer = UiLayer::new(Arc::clone(&logs));
+
+        for index in 0..(MAX_BUFFERED_LINES + 10) {
+            layer.push(format!("line {index}"));
+        }
+
+        let logs = logs.lock().expect("buffer lock");
+        assert_eq!(logs.len(), MAX_BUFFERED_LINES);
+        assert!(logs.front().is_some_and(|line| line == "line 10"));
+    }
+
+    #[test]
+    fn level_tags_are_stable() {
+        assert_eq!(level_tag(Level::INFO), "[INFO]");
+        assert_eq!(level_tag(Level::WARN), "[WARN]");
+        assert_eq!(level_tag(Level::ERROR), "[ERROR]");
+    }
+}

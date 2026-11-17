@@ -9,16 +9,15 @@ and record important architecture decisions as they are made.
 ## Current Status (обновляй этот блок каждый день)
 
 - **Date:** 2026-11-17
-- **Phase:** Client-focused driver management (Step 2) — implemented and committed.
-- **Done:** `doip-client` now checks Npcap and Loopback at startup, prints a
-  colored status, and has an **Install** menu item that downloads and runs the
-  missing Windows driver installers. Linux behaviour is a stub. Windows target
-  code compiles under `cargo check`/`clippy`.
-- **Next Step:** Test the client build on **Windows 11** — verify Npcap/Loopback
-  detection, installation from the menu, UAC/admin behaviour, and status
-  refresh. Server/relay work (`doip-server`) is postponed.
-- **Repo state:** branch `main`; previous commits `f5a86ce`, `29f6ddc`. This
-  update is committed as `feat: add driver status check and install menu`.
+- **Phase:** Ratatui dashboard migration (stages 1-6) — in progress.
+- **Done:** Stage 1/6 — dependencies swapped (`inquire` removed; `ratatui 0.26`,
+  `crossterm 0.27`, `tracing-appender 0.2` added) and logging now goes both to
+  `doip-remote.log` next to the executable and to an in-memory ring buffer
+  (`src/logging.rs`) that the future TUI will render.
+- **Next Step:** Stage 2/6 — `AppState` in `src/app.rs` (menu index, focus,
+  driver/admin/connection statuses, logs buffer, scroll).
+- **Repo state:** branch `main`; the TUI is built stage by stage, each stage is
+  committed as `wip: stage N completed`. Server/relay work is postponed.
 
 ## Architecture
 
