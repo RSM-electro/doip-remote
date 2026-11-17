@@ -95,6 +95,8 @@ pub struct App {
     pub logs: Arc<Mutex<VecDeque<String>>>,
     /// How many lines the log panel is scrolled up from the bottom.
     pub log_scroll: u16,
+    /// Pending Diag session-code input, if the input popup is open.
+    pub diag_input: Option<String>,
     /// Set when the event loop should exit.
     pub should_quit: bool,
 }
@@ -114,6 +116,7 @@ impl App {
             connection_status: ConnectionStatus::Disconnected,
             logs,
             log_scroll: 0,
+            diag_input: None,
             should_quit: false,
         }
     }

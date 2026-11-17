@@ -10,11 +10,13 @@ and record important architecture decisions as they are made.
 
 - **Date:** 2026-11-17
 - **Phase:** Ratatui dashboard migration (stages 1-6) — in progress.
-- **Done:** Stage 2/6 — `src/app.rs` holds the dashboard state (`App`,
-  `Focus`, `ConnectionStatus`, `MenuItem`) with menu navigation, focus toggle,
-  log scrolling and driver flags; covered by 8 unit tests.
-- **Next Step:** Stage 3/6 — ratatui renderer and event loop: terminal setup,
-  panic/Ctrl+C restore, header/menu/status/log layout, Tab and PageUp/PageDown.
+- **Done:** Stage 3/6 — full ratatui dashboard: header, 70/30 menu and dot-aligned
+  status panel, bottom log console with focus/scroll, Diag code popup, delete
+  confirmation popup, and a key-reader thread. Terminal setup restores on
+  panic/Ctrl+C. Verified in a PTY.
+- **Next Step:** Stage 4/6 — background driver installation: `check_all()`,
+  `install_all_async()`, download progress in the log, captured installer
+  output, completion event over an mpsc channel.
 - **Repo state:** branch `main`; the TUI is built stage by stage, each stage is
   committed as `wip: stage N completed`. Server/relay work is postponed.
 

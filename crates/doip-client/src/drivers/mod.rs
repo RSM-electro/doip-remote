@@ -75,6 +75,37 @@ pub fn check_drivers() -> DriverStatus {
     }
 }
 
+/// Returns `true` when the current process has administrator privileges.
+///
+/// On Windows this runs `net session`, which only succeeds for elevated
+/// processes. The console window is suppressed.
+#[cfg(target_os = "windows")]
+#[must_use]
+pub fn is_admin() -> bool {
+    use std::os::windows::process::CommandExt;
+
+    /// Do not flash a console window while probing.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    Command::new("net")
+        .args(["session"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+/// Returns `true` when the current process has administrator privileges.
+///
+/// Always `false` outside Windows.
+#[cfg(not(target_os = "windows"))]
+#[must_use]
+pub fn is_admin() -> bool {
+    false
+}
+
 /// Downloads and installs the missing drivers.
 ///
 /// Npcap is downloaded from the official site and installed silently (`/S`).
