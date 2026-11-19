@@ -24,6 +24,10 @@ pub enum ConnectionStatus {
     /// No tunnel has been established.
     Disconnected,
     /// A tunnel to the relay is established.
+    ///
+    /// Reserved for the future relay implementation. Nothing constructs it yet:
+    /// the client reports `Disconnected` until the server exists.
+    #[allow(dead_code)]
     Connected,
 }
 
@@ -177,15 +181,16 @@ impl App {
         self.npcap_status && self.loopback_status
     }
 
-    /// Pretends that everything is installed and connected.
+    /// Pretends that admin rights and drivers are available.
     ///
-    /// Used by the `--mock` command-line flag to preview the green dashboard on
-    /// a development machine.
+    /// Used by the `--mock` command-line flag to preview the dashboard on a
+    /// development machine. The network status is deliberately **not** faked:
+    /// there is no relay yet, so the status stays `Disconnected`.
     pub fn enable_mock(&mut self) {
         self.admin_status = true;
         self.npcap_status = true;
         self.loopback_status = true;
-        self.connection_status = ConnectionStatus::Connected;
+        self.connection_status = ConnectionStatus::Disconnected;
     }
 }
 
@@ -267,7 +272,7 @@ mod tests {
     }
 
     #[test]
-    fn mock_mode_turns_everything_green() {
+    fn mock_mode_turns_admin_and_drivers_green_but_not_the_network() {
         let mut app = app();
         app.enable_mock();
 
@@ -275,6 +280,6 @@ mod tests {
         assert!(app.npcap_status);
         assert!(app.loopback_status);
         assert!(app.drivers_ready());
-        assert_eq!(app.connection_status, ConnectionStatus::Connected);
+        assert_eq!(app.connection_status, ConnectionStatus::Disconnected);
     }
 }

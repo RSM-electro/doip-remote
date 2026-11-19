@@ -39,7 +39,7 @@ async fn main() -> ExitCode {
     let mut app = App::new(logs);
     let drivers_ok = if mock {
         app.enable_mock();
-        info!("[OK] Mock-режим: все статусы эмулируются зелёными.");
+        info!("[OK] Mock-режим: права администратора и драйверы эмулируются, сеть — нет.");
         true
     } else {
         app.admin_status = drivers::is_admin();

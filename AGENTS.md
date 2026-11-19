@@ -8,17 +8,21 @@ and record important architecture decisions as they are made.
 
 ## Current Status (обновляй этот блок каждый день)
 
-- **Date:** 2026-11-17
+- **Date:** 2026-11-19
 - **Phase:** Ratatui dashboard migration (stages 1-6) — complete and committed.
 - **Done:** Stage 6/6 — `--mock` mode and final verification. The client is now a
   ratatui dashboard with a menu, dot-aligned status panel, scrolling log console,
   background driver installation, UAC gate and a cleanup modal. `inquire` is gone.
+  Follow-up: the key-hint row is now readable (bold yellow keys, cyan actions),
+  and `--mock` no longer fakes the connection: the status stays `Disconnected`
+  (`[ОТКЛЮЧЕНО]`) until the relay server exists.
 - **Next Step:** Validate on real **Windows 11**: TUI rendering, driver
   detection/installation, UAC, and log deletion (full checklist below).
   Server/relay work (`doip-server`) remains postponed.
 - **Repo state:** branch `main`; stages 1-5 are committed as
   `wip: stage N completed`, stage 6 as the final dashboard commit, followed by
-  `fix(ui): improve hotkeys readability with yellow/cyan colors`.
+  `fix(ui): improve hotkeys readability with yellow/cyan colors` and
+  `fix(state): force connection status to Disconnected until server is implemented`.
 
 ## Architecture
 
@@ -104,8 +108,9 @@ driver flow is validated.
   - Linux/non-Windows: stub returning `false`/`false`; admin is `false`.
 - **Status panel:** `Права Админа` (green `[OK]` / yellow `[НЕТ]`), `Npcap` and
   `Loopback` (green `[OK]` / red `[НЕТ]`), `Соединение` (red `[ОТКЛЮЧЕНО]` /
-  green `[ЕСТЬ КОНТАКТ ✓]`). The connection is always disconnected except in
-  `--mock` mode.
+  green `[ЕСТЬ КОНТАКТ ✓]`). The connection is always `Disconnected`: the
+  `Connected` variant is reserved for the future relay and is never constructed,
+  including in `--mock` mode.
 - **Menu:** Install / Car / Diag / Cleanup (red) / Exit.
 - **Navigation:** `↑`/`↓` move (or scroll logs), `Enter` activates, `Tab`
   toggles menu/log focus, `PageUp`/`PageDown` scroll the log panel, `Ctrl+C`
@@ -125,8 +130,9 @@ driver flow is validated.
 - **Cleanup:** opens a `Y/N` confirmation popup. `Y` calls the driver-removal
   stub, deletes `doip-remote.log` and exits; on Windows the deletion is retried
   after the log writer is dropped.
-- **`--mock`:** forces admin/driver/connection statuses green so the dashboard
-  can be previewed on Linux.
+- **`--mock`:** forces admin rights and both driver statuses green so the
+  dashboard can be previewed on Linux. The network status is deliberately not
+  faked and stays red `[ОТКЛЮЧЕНО]` until the server exists.
 - Networking and driver removal are **stubs**; driver detection/installation is
   real only on Windows.
 
@@ -138,7 +144,7 @@ source "$HOME/.cargo/env"   # if cargo is not on PATH
 cargo build --workspace
 cargo test --workspace
 cargo run -p doip-client
-cargo run -p doip-client -- --mock   # green demo dashboard
+cargo run -p doip-client -- --mock   # preview with admin/drivers emulated
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 
@@ -160,9 +166,9 @@ cargo clippy -p doip-client --all-targets --target x86_64-pc-windows-msvc -- -D 
 - Linux PTY runs — OK: red status dashboard; menu navigation; Tab/PgUp/PgDn log
   focus and scrolling; Car code generation; Diag popup and parse-error log;
   Install admin gate; cleanup modal (cancel + confirm, log file deleted);
-  `--mock` all-green dashboard with `ЕСТЬ КОНТАКТ`; Ctrl+C restores the
-  alternate screen, cursor and raw mode. The hint row renders bold yellow
-  `[ключ]` caps and cyan descriptions (SGR `38;5;3` / `38;5;6`).
+  `--mock` dashboard with green admin/drivers and red `[ОТКЛЮЧЕНО]`; Ctrl+C
+  restores the alternate screen, cursor and raw mode. The hint row renders bold
+  yellow `[ключ]` caps and cyan descriptions (SGR `38;5;3` / `38;5;6`).
 - Actual driver detection/installation on real Windows 11 is **not yet tested**.
 
 ## Environment notes

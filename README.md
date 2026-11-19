@@ -61,7 +61,7 @@ cargo build --workspace
 ```sh
 cargo run -p doip-client
 
-# Preview the fully green dashboard (admin, drivers and connection emulated)
+# Preview the dashboard with emulated admin rights and drivers
 cargo run -p doip-client -- --mock
 ```
 
@@ -73,7 +73,7 @@ console at the bottom:
 │> Установить драйверы               ││ Права Админа........... [OK] │
 │  Я рядом с машиной (Car)           ││ Npcap.................. [OK] │
 │  Я диагност (Diag)                 ││ Loopback............... [OK] │
-│  Завершить диагностику с удалением ││ Соединение.... [ЕСТЬ КОНТАКТ]│
+│  Завершить диагностику с удалением ││ Соединение...... [ОТКЛЮЧЕНО] │
 │  Завершить диагностику             ││                              │
 └────────────────────────────────────┘└──────────────────────────────┘
 ┌ [ ЛОГИ ] ───────────────────────────────────────────────────────────┐
@@ -119,7 +119,9 @@ installs the Loopback adapter from `%SystemRoot%\INF\netloop.inf` via
 `InfDefaultInstall.exe` and forwards its stdout/stderr to the log. The menu is
 locked until the installation finishes, then the statuses are refreshed.
 Driver installation is Windows-only. On Linux the client reports that the
-drivers are missing and refuses to install; use `--mock` to preview the green UI.
+drivers are missing and refuses to install; use `--mock` to preview the dashboard
+with emulated admin rights and drivers. The connection status is never emulated:
+it stays red `[ОТКЛЮЧЕНО]` until the relay server is implemented.
 
 ## Session code format
 
