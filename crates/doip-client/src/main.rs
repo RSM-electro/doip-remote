@@ -7,6 +7,7 @@
 mod app;
 mod drivers;
 mod logging;
+mod net;
 mod tui;
 mod ui;
 
@@ -24,6 +25,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use doip_core::{Role, SessionCode};
 use drivers::InstallEvent;
 use tokio::sync::mpsc as tokio_mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 /// Placeholder relay address until the networking layer is implemented.
@@ -59,8 +61,15 @@ async fn main() -> ExitCode {
         }
     };
 
-    let result = run(&mut terminal, &mut app, &mut logger).await;
+    let cancellation = CancellationToken::new();
+    let network = net::NetworkService::start(cancellation.clone(), None);
+
+    let result = run(&mut terminal, &mut app, &mut logger, &cancellation).await;
     tui::restore();
+
+    // Any exit path cancels the network tasks; shutdown waits for the tasks and
+    // drops their sockets before the process ends.
+    network.shutdown().await;
 
     // The log writer must be closed before the file can be removed on Windows.
     let delete_log = app.delete_log_on_exit;
@@ -118,6 +127,7 @@ async fn run(
     terminal: &mut tui::Tui,
     app: &mut App,
     logger: &mut Option<logging::Logger>,
+    cancellation: &CancellationToken,
 ) -> io::Result<()> {
     let keys = tui::spawn_key_reader();
     let (install_tx, mut install_rx) = tokio_mpsc::unbounded_channel();
@@ -126,7 +136,7 @@ async fn run(
         terminal.draw(|frame| ui::draw(frame, app))?;
 
         while let Ok(key) = keys.try_recv() {
-            handle_key(app, key, &install_tx, logger);
+            handle_key(app, key, &install_tx, logger, cancellation);
         }
 
         while let Ok(event) = install_rx.try_recv() {
@@ -136,6 +146,9 @@ async fn run(
         tokio::time::sleep(Duration::from_millis(16)).await;
     }
 
+    // Safety net for early returns and any quit path that forgot to cancel.
+    cancellation.cancel();
+
     Ok(())
 }
 
@@ -144,11 +157,13 @@ fn handle_key(
     key: KeyEvent,
     install_tx: &tokio_mpsc::UnboundedSender<InstallEvent>,
     logger: &mut Option<logging::Logger>,
+    cancellation: &CancellationToken,
 ) {
     // Ctrl+C must work in every mode, including the modals.
     if key.modifiers.contains(KeyModifiers::CONTROL)
         && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
     {
+        cancellation.cancel();
         app.should_quit = true;
         return;
     }
@@ -223,7 +238,7 @@ fn handle_key(
                 if app.is_installing {
                     warn!("Дождитесь завершения установки драйверов.");
                 } else {
-                    activate(app, install_tx);
+                    activate(app, install_tx, cancellation);
                 }
             }
         }
@@ -231,15 +246,23 @@ fn handle_key(
             if app.focus == Focus::Logs {
                 app.focus = Focus::Menu;
             } else {
+                cancellation.cancel();
                 app.should_quit = true;
             }
         }
-        KeyCode::Char('q') if app.focus == Focus::Menu => app.should_quit = true,
+        KeyCode::Char('q') if app.focus == Focus::Menu => {
+            cancellation.cancel();
+            app.should_quit = true;
+        }
         _ => {}
     }
 }
 
-fn activate(app: &mut App, install_tx: &tokio_mpsc::UnboundedSender<InstallEvent>) {
+fn activate(
+    app: &mut App,
+    install_tx: &tokio_mpsc::UnboundedSender<InstallEvent>,
+    cancellation: &CancellationToken,
+) {
     match app.selected() {
         MenuItem::Install => begin_install(app, install_tx),
         MenuItem::Car => begin_car(app),
@@ -250,7 +273,10 @@ fn activate(app: &mut App, install_tx: &tokio_mpsc::UnboundedSender<InstallEvent
         MenuItem::Cleanup => {
             app.show_confirm_delete = true;
         }
-        MenuItem::Exit => app.should_quit = true,
+        MenuItem::Exit => {
+            cancellation.cancel();
+            app.should_quit = true;
+        }
     }
 }
 

@@ -100,7 +100,7 @@ Keyboard:
 | `Enter` | Activate the selected entry |
 | `Tab` | Switch focus between the menu and the log console |
 | `PageUp` / `PageDown` | Scroll the log console (logs focused) |
-| `Ctrl+C` | Quit immediately, restoring the terminal |
+| `Ctrl+C` | Quit immediately, restoring the terminal and closing network sockets |
 
 Logs are written both to `doip-remote.log` (next to the executable) and to the
 console. The terminal is always restored on exit, on `Ctrl+C` and on panic.
@@ -108,6 +108,11 @@ Networking is still a stub; the session-code generator/parser and the Windows
 driver flow are real. Choosing **Удалить драйверы и логи** closes the file writer
 before deleting the log, so the app keeps running without Windows sharing
 violations and shows the refreshed `[НЕТ]` / `[MISSING]` statuses.
+
+Every exit path (Finish diagnostics, `Esc`, `q`, `Ctrl+C`) cancels a shared
+`CancellationToken`. `net::NetworkService` waits for its spawned tasks, drops
+listeners so their ports are released, and closes accepted streams with
+`linger(0)` to avoid leftover `TIME_WAIT` sockets.
 
 ## Driver checks
 

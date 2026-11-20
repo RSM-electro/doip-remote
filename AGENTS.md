@@ -23,6 +23,8 @@ and record important architecture decisions as they are made.
   "Завершить диагностику" entries; cleanup swaps the file writer for a sink,
   deletes `doip-remote.log` without Windows lock errors and keeps the app running
   with refreshed statuses.
+  Shutdown: `net::NetworkService` owns a cancellation token and a join set; every
+  exit path cancels it and waits for tasks to drop their sockets.
 - **Next Step:** Continue the Windows polish series: menu/lifecycle split, safe
   log deletion, graceful network shutdown, driver fixes and clipboard/version
   extras. After that, validate on real **Windows 11** (full checklist below).
@@ -48,6 +50,11 @@ and record important architecture decisions as they are made.
   implemented yet; `token` and `key` in session codes are currently random
   placeholders, not negotiated secrets.
 - **UI:** ratatui dashboard (crossterm backend); no WebView2, no `inquire`.
+- **Shutdown:** a `tokio_util::sync::CancellationToken`, owned by
+  `net::NetworkService` together with a `JoinSet`, stops every network task.
+  Finish diagnostics, `Esc`, `q` and `Ctrl+C` cancel the token; shutdown waits up
+  to 3 s, aborts stragglers, drops listeners (releasing their ports) and closes
+  accepted streams with `linger(0)` so nothing lingers in `TIME_WAIT`.
 - **Roles:** `Car` (agent next to the vehicle) and `Diag` (remote technician).
 
 ## Workspace layout
@@ -63,6 +70,7 @@ doip-remote/
 │           ├── ui.rs          # ratatui layout, status rows, modals
 │           ├── tui.rs         # Terminal init/restore, panic hook, key reader
 │           ├── logging.rs     # File + in-memory log layers
+│           ├── net.rs         # Cancellation token, network tasks, shutdown
 │           └── drivers/mod.rs # Npcap/Loopback detection and installation
 ├── .github/workflows/ # CI: build + test on Ubuntu and Windows
 ├── Cargo.toml         # Cargo workspace
@@ -145,8 +153,8 @@ driver flow is validated.
   appender guard (closing the file handle) and deletes `doip-remote.log`; the app
   **keeps running** and logs `[INFO] Logging disabled, log file deleted`. Driver,
   log-file and connection statuses are refreshed immediately.
-- **Finish diagnostics:** exits the application (graceful network shutdown is
-  prepared in the next checkpoint).
+- **Finish diagnostics:** exits the application and cancels the network token;
+  active tasks stop and their sockets are closed before the process ends.
 - **`--mock`:** forces admin rights and both driver statuses green so the
   dashboard can be previewed on Linux. The network status is deliberately not
   faked and stays red `[ОТКЛЮЧЕНО]` until the server exists.
