@@ -100,6 +100,10 @@ pub struct App {
     pub log_scroll: u16,
     /// Pending Diag session-code input, if the input popup is open.
     pub diag_input: Option<String>,
+    /// Generated Car session code shown in a popup, if it is open.
+    pub session_code: Option<String>,
+    /// Whether `doip-remote.log` currently exists on disk.
+    pub log_file_exists: bool,
     /// Remove the log file once the writer is closed (needed on Windows, where
     /// an open file cannot be deleted).
     pub delete_log_on_exit: bool,
@@ -123,6 +127,8 @@ impl App {
             logs,
             log_scroll: 0,
             diag_input: None,
+            session_code: None,
+            log_file_exists: false,
             delete_log_on_exit: false,
             should_quit: false,
         }
@@ -179,6 +185,16 @@ impl App {
     #[must_use]
     pub fn drivers_ready(&self) -> bool {
         self.npcap_status && self.loopback_status
+    }
+
+    /// Updates the log-file flag shown in the status panel.
+    pub fn set_log_file_exists(&mut self, exists: bool) {
+        self.log_file_exists = exists;
+    }
+
+    /// Opens the popup that shows a freshly generated Car session code.
+    pub fn set_session_code(&mut self, code: String) {
+        self.session_code = Some(code);
     }
 
     /// Pretends that admin rights and drivers are available.
@@ -281,5 +297,19 @@ mod tests {
         assert!(app.loopback_status);
         assert!(app.drivers_ready());
         assert_eq!(app.connection_status, ConnectionStatus::Disconnected);
+    }
+
+    #[test]
+    fn session_code_popup_and_log_file_status_are_tracked() {
+        let mut app = app();
+
+        assert!(app.session_code.is_none());
+        assert!(!app.log_file_exists);
+
+        app.set_session_code("DT1-test".to_owned());
+        app.set_log_file_exists(true);
+
+        assert_eq!(app.session_code.as_deref(), Some("DT1-test"));
+        assert!(app.log_file_exists);
     }
 }

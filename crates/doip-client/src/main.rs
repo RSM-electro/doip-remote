@@ -49,6 +49,7 @@ async fn main() -> ExitCode {
     };
 
     log_startup_status(&app, drivers_ok);
+    app.set_log_file_exists(logging::log_file_path().is_file());
 
     let mut terminal = match tui::init() {
         Ok(terminal) => terminal,
@@ -95,7 +96,7 @@ fn log_startup_status(app: &App, drivers_ok: bool) {
     if app.admin_status {
         info!("[OK] Права администратора есть.");
     } else {
-        warn!("Нет прав администратора: установка драйверов недоступна.");
+        warn!("[!] Нет прав администратора: установка драйверов недоступна.");
     }
 
     info!(
@@ -155,6 +156,13 @@ fn handle_key(
                 info!("Удаление отменено.");
             }
             _ => {}
+        }
+        return;
+    }
+
+    if app.session_code.is_some() {
+        if matches!(key.code, KeyCode::Enter | KeyCode::Esc) {
+            app.session_code = None;
         }
         return;
     }
@@ -229,7 +237,7 @@ fn handle_key(
 fn activate(app: &mut App, install_tx: &tokio_mpsc::UnboundedSender<InstallEvent>) {
     match app.selected() {
         MenuItem::Install => begin_install(app, install_tx),
-        MenuItem::Car => begin_car(),
+        MenuItem::Car => begin_car(app),
         MenuItem::Diag => {
             app.diag_input = Some(String::new());
             info!("Введите код подключения DT1-...");
@@ -248,7 +256,9 @@ fn begin_install(app: &mut App, install_tx: &tokio_mpsc::UnboundedSender<Install
     }
 
     if !app.admin_status {
-        warn!("Требуются права Администратора. Перезапустите программу от имени Администратора.");
+        warn!(
+            "[!] Требуются права Администратора. Перезапустите программу от имени Администратора."
+        );
         return;
     }
 
@@ -285,13 +295,15 @@ fn handle_install_event(app: &mut App, event: InstallEvent) {
     }
 }
 
-fn begin_car() {
+fn begin_car(app: &mut App) {
     let session = SessionCode::new(Role::Car, RELAY_SERVER, None);
     let code = session.generate();
 
     info!("Сессия Car создана. Передайте код диагносту:");
     info!("{code}");
     info!("Ожидание подключения к серверу (заглушка)...");
+
+    app.set_session_code(code);
 }
 
 fn accept_diag_code(input: &str) {

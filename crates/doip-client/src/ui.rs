@@ -9,7 +9,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
 
@@ -55,16 +55,25 @@ pub fn draw(frame: &mut Frame, app: &App) {
     if let Some(input) = &app.diag_input {
         draw_diag_input(frame, area, input);
     }
+
+    if let Some(code) = &app.session_code {
+        draw_session_code(frame, area, code);
+    }
+}
+
+fn header_title() -> Line<'static> {
+    Line::from(Span::styled(
+        "=== DoIP Remote ===",
+        Style::default()
+            .fg(Color::Magenta)
+            .add_modifier(Modifier::BOLD),
+    ))
 }
 
 fn draw_header(frame: &mut Frame, area: Rect) {
-    let title = Line::from(Span::styled(
-        "=== DoIP Remote ===",
-        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-    ));
     let hints = hotkeys_line();
 
-    let header = Paragraph::new(vec![title, hints]).alignment(Alignment::Center);
+    let header = Paragraph::new(vec![header_title(), hints]).alignment(Alignment::Center);
     frame.render_widget(header, area);
 }
 
@@ -147,24 +156,16 @@ fn draw_statuses(frame: &mut Frame, area: Rect, app: &App) {
     let block = Block::default().borders(Borders::ALL).title(" Статусы ");
     let width = block.inner(area).width as usize;
 
-    let admin = if app.admin_status {
-        status_line(
-            "Права Админа",
-            "[OK]",
-            Style::default().fg(Color::Green),
-            width,
-        )
-    } else {
-        status_line(
-            "Права Админа",
-            "[НЕТ]",
-            Style::default().fg(Color::Yellow),
-            width,
-        )
-    };
-
-    let npcap = driver_line("Npcap", app.npcap_status, width);
-    let loopback = driver_line("Loopback", app.loopback_status, width);
+    let admin = ok_line("Права Админа", app.admin_status, width);
+    let npcap = ok_line("Npcap", app.npcap_status, width);
+    let loopback = ok_line("Loopback", app.loopback_status, width);
+    let log_file = presence_line(
+        "Log File",
+        app.log_file_exists,
+        "[EXISTS]",
+        "[MISSING]",
+        width,
+    );
 
     let connection = match app.connection_status {
         ConnectionStatus::Connected => status_line(
@@ -183,15 +184,32 @@ fn draw_statuses(frame: &mut Frame, area: Rect, app: &App) {
         ),
     };
 
-    let lines = vec![admin, npcap, loopback, connection];
+    let lines = vec![admin, npcap, loopback, log_file, connection];
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-fn driver_line(label: &str, installed: bool, width: usize) -> Line<'static> {
-    if installed {
-        status_line(label, "[OK]", Style::default().fg(Color::Green), width)
+/// Builds an `[OK]` / `[НЕТ]` row. Anything that is not present is **red**:
+/// a missing driver (or missing admin rights) must never look healthy.
+fn ok_line(label: &str, present: bool, width: usize) -> Line<'static> {
+    presence_line(label, present, "[OK]", "[НЕТ]", width)
+}
+
+fn presence_line(
+    label: &str,
+    present: bool,
+    present_text: &str,
+    missing_text: &str,
+    width: usize,
+) -> Line<'static> {
+    if present {
+        status_line(
+            label,
+            present_text,
+            Style::default().fg(Color::Green),
+            width,
+        )
     } else {
-        status_line(label, "[НЕТ]", Style::default().fg(Color::Red), width)
+        status_line(label, missing_text, Style::default().fg(Color::Red), width)
     }
 }
 
@@ -242,10 +260,8 @@ fn visible_logs(logs: &[String], scroll: usize, height: usize) -> Vec<Line<'stat
     let end = logs.len().saturating_sub(scroll);
     let start = end.saturating_sub(height);
 
-    let mut lines: Vec<Line<'static>> = logs[start..end]
-        .iter()
-        .map(|line| Line::from(Span::styled(line.clone(), log_style(line))))
-        .collect();
+    let mut lines: Vec<Line<'static>> =
+        logs[start..end].iter().map(|line| log_line(line)).collect();
 
     // Push short logs to the bottom so the newest entry sits right above the
     // border, like a console.
@@ -270,6 +286,24 @@ fn log_style(line: &str) -> Style {
     }
 }
 
+/// Renders one log line, highlighting the `[!]` admin warning marker in bold red.
+fn log_line(line: &str) -> Line<'static> {
+    let style = log_style(line);
+    let Some(rest) = line.strip_prefix("[WARN] [!]") else {
+        return Line::from(Span::styled(line.to_owned(), style));
+    };
+
+    Line::from(vec![
+        Span::styled("[WARN]", Style::default().fg(Color::Yellow)),
+        Span::raw(" "),
+        Span::styled(
+            "[!]",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(rest.to_owned(), Style::default().fg(Color::Yellow)),
+    ])
+}
+
 fn draw_confirm_delete(frame: &mut Frame, area: Rect) {
     let popup = centered_rect(64, 24, area);
     frame.render_widget(Clear, popup);
@@ -292,6 +326,45 @@ fn draw_confirm_delete(frame: &mut Frame, area: Rect) {
 
     let paragraph = Paragraph::new(lines)
         .block(block)
+        .alignment(Alignment::Center);
+    frame.render_widget(paragraph, popup);
+}
+
+/// Green line used for the generated session code.
+fn code_line(code: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        code.to_owned(),
+        Style::default().fg(Color::Green),
+    ))
+}
+
+fn draw_session_code(frame: &mut Frame, area: Rect, code: &str) {
+    let popup = centered_rect(82, 32, area);
+    frame.render_widget(Clear, popup);
+
+    let lines = vec![
+        Line::from(Span::styled(
+            "Код подключения Car:",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        code_line(code),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Enter / Esc — закрыть",
+            Style::default().fg(MUTED),
+        )),
+    ];
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Сессия Car ")
+        .border_style(Style::default().fg(Color::Green));
+
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false })
         .alignment(Alignment::Center);
     frame.render_widget(paragraph, popup);
 }
@@ -398,6 +471,67 @@ mod tests {
         assert_eq!(log_style("[ERROR] boom").fg, Some(Color::Red));
         assert_eq!(log_style("[WARN] hmm").fg, Some(Color::Yellow));
         assert_eq!(log_style("[OK] yes").fg, Some(Color::Green));
+    }
+
+    #[test]
+    fn header_is_magenta_and_bold() {
+        let title = header_title();
+
+        assert_eq!(title.spans[0].content, "=== DoIP Remote ===");
+        assert_eq!(title.spans[0].style.fg, Some(Color::Magenta));
+        assert!(title.spans[0].style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn missing_statuses_are_always_red() {
+        for line in [
+            ok_line("Права Админа", false, 30),
+            ok_line("Npcap", false, 30),
+            ok_line("Loopback", false, 30),
+            presence_line("Log File", false, "[EXISTS]", "[MISSING]", 30),
+        ] {
+            let value = line.spans.last().expect("status value");
+            assert_eq!(value.style.fg, Some(Color::Red));
+        }
+
+        let healthy = ok_line("Npcap", true, 30);
+        assert_eq!(
+            healthy.spans.last().expect("status value").style.fg,
+            Some(Color::Green)
+        );
+    }
+
+    #[test]
+    fn log_file_row_uses_exists_and_missing_tags() {
+        let missing = presence_line("Log File", false, "[EXISTS]", "[MISSING]", 30);
+        assert_eq!(
+            missing.spans.last().expect("value").content.as_ref(),
+            "[MISSING]"
+        );
+
+        let present = presence_line("Log File", true, "[EXISTS]", "[MISSING]", 30);
+        assert_eq!(
+            present.spans.last().expect("value").content.as_ref(),
+            "[EXISTS]"
+        );
+    }
+
+    #[test]
+    fn admin_warning_marker_is_bold_red() {
+        let line = log_line("[WARN] [!] Нет прав администратора");
+        let marker = &line.spans[2];
+
+        assert_eq!(marker.content, "[!]");
+        assert_eq!(marker.style.fg, Some(Color::Red));
+        assert!(marker.style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn generated_code_is_green() {
+        let line = code_line("DT1-example");
+
+        assert_eq!(line.spans[0].content, "DT1-example");
+        assert_eq!(line.spans[0].style.fg, Some(Color::Green));
     }
 
     #[test]

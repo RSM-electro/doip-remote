@@ -52,6 +52,17 @@ pub fn log_file_path() -> PathBuf {
 pub fn init(logs: Arc<Mutex<VecDeque<String>>>) -> Option<WorkerGuard> {
     let path = log_file_path();
     let directory = path.parent().unwrap_or_else(|| Path::new("."));
+
+    // Create the file eagerly: the status panel reports its existence and the
+    // rolling appender itself opens files lazily on the first write.
+    if let Err(error) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        eprintln!("Не удалось создать лог {}: {error}", path.display());
+    }
+
     let appender = tracing_appender::rolling::never(directory, LOG_FILE_NAME);
     let (writer, guard) = tracing_appender::non_blocking(appender);
 

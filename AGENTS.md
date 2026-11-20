@@ -8,21 +8,26 @@ and record important architecture decisions as they are made.
 
 ## Current Status (обновляй этот блок каждый день)
 
-- **Date:** 2026-11-19
-- **Phase:** Ratatui dashboard migration (stages 1-6) — complete and committed.
+- **Date:** 2026-11-20
+- **Phase:** Windows polish and lifecycle work in progress (4 checkpoints).
 - **Done:** Stage 6/6 — `--mock` mode and final verification. The client is now a
   ratatui dashboard with a menu, dot-aligned status panel, scrolling log console,
   background driver installation, UAC gate and a cleanup modal. `inquire` is gone.
   Follow-up: the key-hint row is now readable (bold yellow keys, cyan actions),
   and `--mock` no longer fakes the connection: the status stays `Disconnected`
   (`[ОТКЛЮЧЕНО]`) until the relay server exists.
-- **Next Step:** Validate on real **Windows 11**: TUI rendering, driver
-  detection/installation, UAC, and log deletion (full checklist below).
+  UI polish: magenta bold header, strictly red `[НЕТ]`/`[MISSING]` statuses, a
+  `Log File` status row, a bold red `[!]` admin warning marker, and a green
+  session-code popup after the Car action.
+- **Next Step:** Continue the Windows polish series: menu/lifecycle split, safe
+  log deletion, graceful network shutdown, driver fixes and clipboard/version
+  extras. After that, validate on real **Windows 11** (full checklist below).
   Server/relay work (`doip-server`) remains postponed.
 - **Repo state:** branch `main`; stages 1-5 are committed as
   `wip: stage N completed`, stage 6 as the final dashboard commit, followed by
-  `fix(ui): improve hotkeys readability with yellow/cyan colors` and
-  `fix(state): force connection status to Disconnected until server is implemented`.
+  `fix(ui): improve hotkeys readability with yellow/cyan colors`,
+  `fix(state): force connection status to Disconnected until server is implemented`
+  and the Windows-polish checkpoints.
 
 ## Architecture
 
@@ -96,7 +101,7 @@ driver flow is validated.
 
 - **Layout:** header (`=== DoIP Remote ===` plus key hints), middle row split
   70/30 into the menu and the dot-aligned status panel, bottom `[ ЛОГИ ]`
-  console. Modals are drawn on top.
+  console. Modals are drawn on top. The header title is **magenta and bold**.
 - **Key hints:** built from the `HOTKEYS` table in `ui.rs` and rendered as
   `[ключ] - действие • ...`; key caps are bold yellow, separators and action
   descriptions are cyan so the row stays readable on a dark terminal.
@@ -106,25 +111,27 @@ driver flow is validated.
     adapter name/description for `Loopback`/`KM-TEST` via `Get-NetAdapter`
     (`netsh` fallback). Admin rights are probed with `net session`.
   - Linux/non-Windows: stub returning `false`/`false`; admin is `false`.
-- **Status panel:** `Права Админа` (green `[OK]` / yellow `[НЕТ]`), `Npcap` and
-  `Loopback` (green `[OK]` / red `[НЕТ]`), `Соединение` (red `[ОТКЛЮЧЕНО]` /
-  green `[ЕСТЬ КОНТАКТ ✓]`). The connection is always `Disconnected`: the
-  `Connected` variant is reserved for the future relay and is never constructed,
-  including in `--mock` mode.
+- **Status panel:** `Права Админа`, `Npcap` and `Loopback` (green `[OK]` / red
+  `[НЕТ]` — a missing value is **never** green), `Log File` (green `[EXISTS]` /
+  red `[MISSING]`, based on `doip-remote.log`), and `Соединение` (red
+  `[ОТКЛЮЧЕНО]` / green `[ЕСТЬ КОНТАКТ ✓]`). The connection is always
+  `Disconnected`: the `Connected` variant is reserved for the future relay and is
+  never constructed, including in `--mock` mode.
 - **Menu:** Install / Car / Diag / Cleanup (red) / Exit.
 - **Navigation:** `↑`/`↓` move (or scroll logs), `Enter` activates, `Tab`
   toggles menu/log focus, `PageUp`/`PageDown` scroll the log panel, `Ctrl+C`
   quits. `Esc` closes a popup; in the menu it quits.
 - **Logs:** written to `doip-remote.log` next to the executable and mirrored into
   the panel by a custom `tracing` layer (ring buffer, 1000 lines). Levels are
-  colour-coded.
+  colour-coded; admin warnings start with a bold red `[!]` marker.
 - **Install (Windows):** a background task streams the Npcap 1.80 download with
   percentage progress in the log, runs the installer **without** `/S`, captures
   `InfDefaultInstall.exe %SystemRoot%\INF\netloop.inf` stdout/stderr into the
   log, then sends a completion event. The menu is locked meanwhile and statuses
   refresh afterwards. Without admin rights the action only logs an instruction
   to restart as Administrator.
-- **Car:** generates a `DT1-...` code (server `"auto"`) and writes it to the log.
+- **Car:** generates a `DT1-...` code (server `"auto"`), logs it and opens a
+  popup where the code is rendered in green.
 - **Diag:** opens a popup; typed/pasted code is parsed on `Enter`, and the
   target IP, DoIP port and relay server are logged.
 - **Cleanup:** opens a `Y/N` confirmation popup. `Y` calls the driver-removal

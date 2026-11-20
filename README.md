@@ -73,8 +73,9 @@ console at the bottom:
 │> Установить драйверы               ││ Права Админа........... [OK] │
 │  Я рядом с машиной (Car)           ││ Npcap.................. [OK] │
 │  Я диагност (Diag)                 ││ Loopback............... [OK] │
-│  Завершить диагностику с удалением ││ Соединение...... [ОТКЛЮЧЕНО] │
-│  Завершить диагностику             ││                              │
+│  Завершить диагностику с удалением ││ Log File........... [EXISTS] │
+│  Завершить диагностику             ││ Соединение...... [ОТКЛЮЧЕНО] │
+│                                    ││                              │
 └────────────────────────────────────┘└──────────────────────────────┘
 ┌ [ ЛОГИ ] ───────────────────────────────────────────────────────────┐
 ```
@@ -84,7 +85,7 @@ Menu entries:
 1. **Установить драйверы** — downloads and installs missing drivers in the
    background (Windows; requires administrator rights).
 2. **Я рядом с машиной (Car)** — generates a new `DT1-...` session code and
-   writes it to the log.
+   shows it in a green popup (and in the log).
 3. **Я диагност (Diag)** — opens a popup for pasting a session code.
 4. **Завершить диагностику с удалением драйверов и логов** (red) — asks for
    confirmation, then removes drivers and `doip-remote.log` and exits.
