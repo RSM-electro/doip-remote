@@ -40,7 +40,7 @@ pub enum MenuItem {
     Car,
     /// Act as the diagnostic peer and accept a session code.
     Diag,
-    /// Stop diagnostics, remove drivers and delete logs.
+    /// Remove the drivers and delete the log file without exiting.
     Cleanup,
     /// Stop diagnostics and quit.
     Exit,
@@ -63,7 +63,7 @@ impl MenuItem {
             Self::Install => "Установить драйверы",
             Self::Car => "Я рядом с машиной (Car)",
             Self::Diag => "Я диагност (Diag)",
-            Self::Cleanup => "Завершить диагностику с удалением драйверов и логов",
+            Self::Cleanup => "Удалить драйверы и логи",
             Self::Exit => "Завершить диагностику",
         }
     }
@@ -297,6 +297,14 @@ mod tests {
         assert!(app.loopback_status);
         assert!(app.drivers_ready());
         assert_eq!(app.connection_status, ConnectionStatus::Disconnected);
+    }
+
+    #[test]
+    fn cleanup_and_exit_are_separate_entries() {
+        assert_eq!(MenuItem::Cleanup.label(), "Удалить драйверы и логи");
+        assert_eq!(MenuItem::Exit.label(), "Завершить диагностику");
+        assert!(MenuItem::Cleanup.is_dangerous());
+        assert!(!MenuItem::Exit.is_dangerous());
     }
 
     #[test]

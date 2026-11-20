@@ -19,6 +19,10 @@ and record important architecture decisions as they are made.
   UI polish: magenta bold header, strictly red `[НЕТ]`/`[MISSING]` statuses, a
   `Log File` status row, a bold red `[!]` admin warning marker, and a green
   session-code popup after the Car action.
+  Lifecycle: the menu now has separate "Удалить драйверы и логи" and
+  "Завершить диагностику" entries; cleanup swaps the file writer for a sink,
+  deletes `doip-remote.log` without Windows lock errors and keeps the app running
+  with refreshed statuses.
 - **Next Step:** Continue the Windows polish series: menu/lifecycle split, safe
   log deletion, graceful network shutdown, driver fixes and clipboard/version
   extras. After that, validate on real **Windows 11** (full checklist below).
@@ -117,13 +121,15 @@ driver flow is validated.
   `[ОТКЛЮЧЕНО]` / green `[ЕСТЬ КОНТАКТ ✓]`). The connection is always
   `Disconnected`: the `Connected` variant is reserved for the future relay and is
   never constructed, including in `--mock` mode.
-- **Menu:** Install / Car / Diag / Cleanup (red) / Exit.
+- **Menu:** Install / Car / Diag / Delete drivers and logs (red) / Finish
+  diagnostics.
 - **Navigation:** `↑`/`↓` move (or scroll logs), `Enter` activates, `Tab`
   toggles menu/log focus, `PageUp`/`PageDown` scroll the log panel, `Ctrl+C`
   quits. `Esc` closes a popup; in the menu it quits.
 - **Logs:** written to `doip-remote.log` next to the executable and mirrored into
   the panel by a custom `tracing` layer (ring buffer, 1000 lines). Levels are
-  colour-coded; admin warnings start with a bold red `[!]` marker.
+  colour-coded; admin warnings start with a bold red `[!]` marker. The file layer
+  is reloadable: cleanup disables it while the in-memory mirror keeps working.
 - **Install (Windows):** a background task streams the Npcap 1.80 download with
   percentage progress in the log, runs the installer **without** `/S`, captures
   `InfDefaultInstall.exe %SystemRoot%\INF\netloop.inf` stdout/stderr into the
@@ -134,9 +140,13 @@ driver flow is validated.
   popup where the code is rendered in green.
 - **Diag:** opens a popup; typed/pasted code is parsed on `Enter`, and the
   target IP, DoIP port and relay server are logged.
-- **Cleanup:** opens a `Y/N` confirmation popup. `Y` calls the driver-removal
-  stub, deletes `doip-remote.log` and exits; on Windows the deletion is retried
-  after the log writer is dropped.
+- **Delete drivers and logs:** opens a `Y/N` confirmation popup. `Y` calls the
+  driver-removal routine, swaps the file log writer for a sink, drops the old
+  appender guard (closing the file handle) and deletes `doip-remote.log`; the app
+  **keeps running** and logs `[INFO] Logging disabled, log file deleted`. Driver,
+  log-file and connection statuses are refreshed immediately.
+- **Finish diagnostics:** exits the application (graceful network shutdown is
+  prepared in the next checkpoint).
 - **`--mock`:** forces admin rights and both driver statuses green so the
   dashboard can be previewed on Linux. The network status is deliberately not
   faked and stays red `[ОТКЛЮЧЕНО]` until the server exists.

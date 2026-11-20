@@ -315,7 +315,7 @@ fn draw_confirm_delete(frame: &mut Frame, area: Rect) {
         )),
         Line::from(""),
         Line::from(Span::styled(
-            "Y — удалить и выйти, N — отмена",
+            "Y — удалить, N — отмена",
             Style::default().fg(MUTED),
         )),
     ];

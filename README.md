@@ -73,7 +73,7 @@ console at the bottom:
 │> Установить драйверы               ││ Права Админа........... [OK] │
 │  Я рядом с машиной (Car)           ││ Npcap.................. [OK] │
 │  Я диагност (Diag)                 ││ Loopback............... [OK] │
-│  Завершить диагностику с удалением ││ Log File........... [EXISTS] │
+│  Удалить драйверы и логи           ││ Log File........... [EXISTS] │
 │  Завершить диагностику             ││ Соединение...... [ОТКЛЮЧЕНО] │
 │                                    ││                              │
 └────────────────────────────────────┘└──────────────────────────────┘
@@ -87,8 +87,9 @@ Menu entries:
 2. **Я рядом с машиной (Car)** — generates a new `DT1-...` session code and
    shows it in a green popup (and in the log).
 3. **Я диагност (Diag)** — opens a popup for pasting a session code.
-4. **Завершить диагностику с удалением драйверов и логов** (red) — asks for
-   confirmation, then removes drivers and `doip-remote.log` and exits.
+4. **Удалить драйверы и логи** (red) — asks for confirmation, removes the
+   drivers and deletes `doip-remote.log`, then keeps the app running with the
+   refreshed statuses.
 5. **Завершить диагностику** — exits.
 
 Keyboard:
@@ -103,8 +104,10 @@ Keyboard:
 
 Logs are written both to `doip-remote.log` (next to the executable) and to the
 console. The terminal is always restored on exit, on `Ctrl+C` and on panic.
-Networking and driver removal are still stubs; the session-code generator/parser
-and the Windows driver flow are real.
+Networking is still a stub; the session-code generator/parser and the Windows
+driver flow are real. Choosing **Удалить драйверы и логи** closes the file writer
+before deleting the log, so the app keeps running without Windows sharing
+violations and shows the refreshed `[НЕТ]` / `[MISSING]` statuses.
 
 ## Driver checks
 

@@ -18,7 +18,7 @@ use std::{
     time::Duration,
 };
 
-use app::{App, Focus, MenuItem};
+use app::{App, ConnectionStatus, Focus, MenuItem};
 use colored::Colorize;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use doip_core::{Role, SessionCode};
@@ -34,7 +34,7 @@ async fn main() -> ExitCode {
     let mock = std::env::args().skip(1).any(|arg| arg == "--mock");
 
     let logs = Arc::new(Mutex::new(VecDeque::new()));
-    let _log_guard = logging::init(Arc::clone(&logs));
+    let mut logger = logging::init(Arc::clone(&logs));
 
     let mut app = App::new(logs);
     let drivers_ok = if mock {
@@ -59,12 +59,12 @@ async fn main() -> ExitCode {
         }
     };
 
-    let result = run(&mut terminal, &mut app).await;
+    let result = run(&mut terminal, &mut app, &mut logger).await;
     tui::restore();
 
     // The log writer must be closed before the file can be removed on Windows.
     let delete_log = app.delete_log_on_exit;
-    drop(_log_guard);
+    drop(logger);
 
     if delete_log {
         let path = logging::log_file_path();
@@ -114,7 +114,11 @@ fn log_startup_status(app: &App, drivers_ok: bool) {
     info!("Tab — переключить фокус на логи, PageUp/PageDown — прокрутка.");
 }
 
-async fn run(terminal: &mut tui::Tui, app: &mut App) -> io::Result<()> {
+async fn run(
+    terminal: &mut tui::Tui,
+    app: &mut App,
+    logger: &mut Option<logging::Logger>,
+) -> io::Result<()> {
     let keys = tui::spawn_key_reader();
     let (install_tx, mut install_rx) = tokio_mpsc::unbounded_channel();
 
@@ -122,7 +126,7 @@ async fn run(terminal: &mut tui::Tui, app: &mut App) -> io::Result<()> {
         terminal.draw(|frame| ui::draw(frame, app))?;
 
         while let Ok(key) = keys.try_recv() {
-            handle_key(app, key, &install_tx);
+            handle_key(app, key, &install_tx, logger);
         }
 
         while let Ok(event) = install_rx.try_recv() {
@@ -139,6 +143,7 @@ fn handle_key(
     app: &mut App,
     key: KeyEvent,
     install_tx: &tokio_mpsc::UnboundedSender<InstallEvent>,
+    logger: &mut Option<logging::Logger>,
 ) {
     // Ctrl+C must work in every mode, including the modals.
     if key.modifiers.contains(KeyModifiers::CONTROL)
@@ -150,7 +155,7 @@ fn handle_key(
 
     if app.show_confirm_delete {
         match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') => confirm_cleanup(app),
+            KeyCode::Char('y') | KeyCode::Char('Y') => confirm_cleanup(app, logger),
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                 app.show_confirm_delete = false;
                 info!("Удаление отменено.");
@@ -320,30 +325,47 @@ fn accept_diag_code(input: &str) {
     }
 }
 
-/// Handles the destructive menu entry: removes the drivers and the log file,
-/// then stops the application.
+/// Handles the destructive menu entry: removes the drivers and deletes the log
+/// file, then keeps the application running so the refreshed statuses are
+/// visible.
 ///
 /// On Windows the log file cannot be deleted while `tracing-appender` still has
-/// it open, so the removal is retried after the writer guard is dropped in
-/// `main`.
-fn confirm_cleanup(app: &mut App) {
+/// it open. [`logging::Logger::delete_log_file`] swaps the file writer for a
+/// sink and drops the old appender guard before calling `remove_file`.
+fn confirm_cleanup(app: &mut App, logger: &mut Option<logging::Logger>) {
     app.show_confirm_delete = false;
 
     drivers::remove_all();
 
-    let path = logging::log_file_path();
-    match std::fs::remove_file(&path) {
-        Ok(()) => info!("[OK] Лог удалён: {}", path.display()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            info!("Лог уже отсутствует: {}", path.display());
+    let deletion = match logger.as_mut() {
+        Some(logger) => logger.delete_log_file(),
+        None => std::fs::remove_file(logging::log_file_path()).or_else(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        }),
+    };
+
+    match deletion {
+        Ok(()) => {
+            app.set_log_file_exists(false);
+            app.delete_log_on_exit = false;
+            info!("Logging disabled, log file deleted");
         }
         Err(error) => {
-            warn!("Не удалось удалить лог сейчас: {error}. Он будет удалён при выходе.");
+            warn!("Не удалось удалить лог: {error}. Повторим при выходе.");
             app.delete_log_on_exit = true;
+            app.set_log_file_exists(logging::log_file_path().is_file());
         }
     }
 
-    app.should_quit = true;
+    let status = drivers::check_all();
+    app.set_driver_status(status.npcap_installed, status.loopback_installed);
+    app.connection_status = ConnectionStatus::Disconnected;
+
+    info!("Очистка завершена. Приложение продолжает работу.");
 }
 
 fn ready_tag(ready: bool) -> &'static str {
