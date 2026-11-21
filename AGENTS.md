@@ -9,7 +9,7 @@ and record important architecture decisions as they are made.
 ## Current Status (обновляй этот блок каждый день)
 
 - **Date:** 2026-11-21
-- **Phase:** Windows polish and lifecycle work in progress (5 checkpoints).
+- **Phase:** Windows polish and lifecycle work in progress (6 checkpoints).
 - **Done:** Stage 6/6 — `--mock` mode and final verification. The client is now a
   ratatui dashboard with a menu, dot-aligned status panel, scrolling log console,
   background driver installation, UAC gate and a cleanup modal. `inquire` is gone.
@@ -29,9 +29,12 @@ and record important architecture decisions as they are made.
   adapter is created with `newdev!UpdateDriverForPlugAndPlayDevicesW`
   (`netloop.inf` + `*msloop`); the Car code is copied to the clipboard on
   `Enter`; the header shows the package version (`v0.1.0`).
-- **Next Step:** Embed the custom application icon (Task 5), then validate the
-  whole flow on real **Windows 11** (full checklist below). Server/relay work
-  (`doip-server`) remains postponed.
+  Icon: `crates/doip-client/build.rs` converts `icon.png` into a multi-size,
+  PNG-compressed `.ico` (16/32/48/64/128/256) and links it through
+  `embed-resource` for Windows targets, so Explorer and the taskbar show it.
+- **Next Step:** Validate the whole flow on real **Windows 11** (full checklist
+  below), including the embedded icon. Server/relay work (`doip-server`) remains
+  postponed.
 - **Repo state:** branch `main`; stages 1-5 are committed as
   `wip: stage N completed`, stage 6 as the final dashboard commit, followed by
   `fix(ui): improve hotkeys readability with yellow/cyan colors`,
@@ -67,6 +70,8 @@ doip-remote/
 ├── crates/
 │   ├── doip-core/     # SessionCode, Role, errors, session-code tests
 │   └── doip-client/   # Interactive ratatui client (binary)
+│       ├── build.rs   # PNG -> multi-size ICO + Windows resource linking
+│       ├── icon.png   # Source application icon (1254×1254 PNG)
 │       └── src/
 │           ├── main.rs        # Event loop, menu actions, install events
 │           ├── app.rs         # App state, menu items, focus, scroll
@@ -197,6 +202,9 @@ cargo clippy -p doip-client --all-targets --target x86_64-pc-windows-msvc -- -D 
 - Windows target code: `cargo check`/`clippy` for
   `x86_64-pc-windows-msvc` — clean (compile only, not runtime-tested), including
   `newdev!UpdateDriverForPlugAndPlayDevicesW` and `arboard`.
+- Icon build: `build.rs` produced a valid 151552-byte ICO with six
+  PNG-compressed entries (16/32/48/64/128/256) in `OUT_DIR`; the Windows check
+  only warns about the missing `llvm-rc` on Linux, as designed.
 - Linux PTY runs — OK: non-admin dashboard with red statuses and bold red `[!]`,
   `Log File [EXISTS]`, magenta bold header with `v0.1.0`, green Car-code popup,
   clipboard copy on `Enter` (`Code copied to clipboard!`), separate cleanup/exit
@@ -218,6 +226,14 @@ cargo clippy -p doip-client --all-targets --target x86_64-pc-windows-msvc -- -D 
   Driver installation requires administrator rights on Windows.
 - Windows-only crates: `windows 0.62` (newdev API) and `arboard 3.7` (clipboard,
   also cross-platform). `tokio-util 0.7` provides `CancellationToken`.
+- Build dependencies (`crates/doip-client`): `embed-resource 3.0` and
+  `image 0.25` (PNG only). `build.rs` generates the `.ico` itself, so no manual
+  conversion is needed.
+- No `rc`/`windres` on this Linux host, so cross-compiling for Windows emits
+  `embed-resource: compilation not attempted: missing compiler: llvm-rc` as a
+  warning and skips the icon. On a real Windows host (or with `llvm-rc` /
+  `windres` installed) the icon is compiled and linked automatically; a resource
+  compilation failure there is a hard error.
 - TUI stack: `ratatui 0.26` + `crossterm 0.27`; logs use `tracing-appender 0.2`.
   `inquire` was removed in stage 1.
 
@@ -238,6 +254,8 @@ Server/relay work is **postponed**. The next milestone is validating the client
 and its driver flow on real Windows 11:
 
 - [ ] `cargo build --workspace` and `cargo test --workspace` on Windows 11.
+- [ ] Confirm the built `.exe` shows the custom icon in Explorer and on the
+      taskbar (the resource is embedded by `build.rs` on Windows).
 - [ ] Confirm the dashboard renders correctly in Windows Terminal (colours,
       borders, Cyrillic, `✓`).
 - [ ] Run as a normal user without Npcap/Loopback: confirm the red admin status,

@@ -57,6 +57,16 @@ doip-remote/
 cargo build --workspace
 ```
 
+On Windows the executable automatically gets the application icon from
+`crates/doip-client/icon.png`: `build.rs` converts it into a multi-size
+PNG-compressed `.ico` (16/32/48/64/128/256) and links it with `embed-resource`,
+so Explorer and the taskbar show it. No manual conversion is required.
+
+When cross-compiling for Windows from Linux without `rc`/`lld` resource tools
+(`llvm-rc` or `windres`), the build still succeeds but prints a warning that the
+icon was skipped. Build on Windows (or install one of those tools) to get the
+icon embedded in the final `.exe`.
+
 ## Run the client
 
 ```sh

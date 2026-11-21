@@ -11,6 +11,11 @@ authors.workspace = true
 name = "doip-client"
 path = "src/main.rs"
 
+# Generates a multi-size ICO from icon.png and links it into the Windows binary.
+[build-dependencies]
+embed-resource = "3.0"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
 [dependencies]
 doip-core = { path = "../doip-core" }
 tokio = { version = "1.54", features = ["full"] }
