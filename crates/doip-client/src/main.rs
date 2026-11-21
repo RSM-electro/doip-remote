@@ -181,8 +181,15 @@ fn handle_key(
     }
 
     if app.session_code.is_some() {
-        if matches!(key.code, KeyCode::Enter | KeyCode::Esc) {
-            app.session_code = None;
+        match key.code {
+            KeyCode::Enter => {
+                if let Some(code) = app.session_code.as_deref() {
+                    copy_session_code(code);
+                }
+                app.session_code = None;
+            }
+            KeyCode::Esc => app.session_code = None,
+            _ => {}
         }
         return;
     }
@@ -337,6 +344,17 @@ fn begin_car(app: &mut App) {
     app.set_session_code(code);
 }
 
+/// Copies the generated session code to the system clipboard.
+fn copy_session_code(code: &str) {
+    let copied =
+        arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(code.to_owned()));
+
+    match copied {
+        Ok(()) => info!("Code copied to clipboard!"),
+        Err(error) => warn!("Не удалось скопировать код в буфер обмена: {error}"),
+    }
+}
+
 fn accept_diag_code(input: &str) {
     match SessionCode::parse(input) {
         Ok(session) => {
@@ -361,7 +379,10 @@ fn accept_diag_code(input: &str) {
 fn confirm_cleanup(app: &mut App, logger: &mut Option<logging::Logger>) {
     app.show_confirm_delete = false;
 
-    drivers::remove_all();
+    match drivers::remove_all() {
+        Ok(()) => info!("[OK] Драйверы удалены."),
+        Err(error) => warn!("Удаление драйверов: {error}"),
+    }
 
     let deletion = match logger.as_mut() {
         Some(logger) => logger.delete_log_file(),

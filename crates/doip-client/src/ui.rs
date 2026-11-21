@@ -75,6 +75,26 @@ fn draw_header(frame: &mut Frame, area: Rect) {
 
     let header = Paragraph::new(vec![header_title(), hints]).alignment(Alignment::Center);
     frame.render_widget(header, area);
+
+    // Version in the top-right corner, from the workspace package version.
+    let version = version_label();
+    let version_width = version.chars().count() as u16;
+    if area.width > version_width + 1 && area.height > 0 {
+        let rect = Rect {
+            x: area.right() - version_width - 1,
+            y: area.y,
+            width: version_width,
+            height: 1,
+        };
+        frame.render_widget(
+            Paragraph::new(version).style(Style::default().fg(MUTED)),
+            rect,
+        );
+    }
+}
+
+fn version_label() -> String {
+    format!("v{}", env!("CARGO_PKG_VERSION"))
 }
 
 /// Builds the hotkey hint row: yellow key caps, cyan separators and actions.
@@ -353,7 +373,7 @@ fn draw_session_code(frame: &mut Frame, area: Rect, code: &str) {
         code_line(code),
         Line::from(""),
         Line::from(Span::styled(
-            "Enter / Esc — закрыть",
+            "Enter — копировать, Esc — закрыть",
             Style::default().fg(MUTED),
         )),
     ];
@@ -480,6 +500,11 @@ mod tests {
         assert_eq!(title.spans[0].content, "=== DoIP Remote ===");
         assert_eq!(title.spans[0].style.fg, Some(Color::Magenta));
         assert!(title.spans[0].style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn version_label_comes_from_cargo() {
+        assert_eq!(version_label(), format!("v{}", env!("CARGO_PKG_VERSION")));
     }
 
     #[test]

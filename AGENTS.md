@@ -8,8 +8,8 @@ and record important architecture decisions as they are made.
 
 ## Current Status (обновляй этот блок каждый день)
 
-- **Date:** 2026-11-20
-- **Phase:** Windows polish and lifecycle work in progress (4 checkpoints).
+- **Date:** 2026-11-21
+- **Phase:** Windows polish and lifecycle work in progress (5 checkpoints).
 - **Done:** Stage 6/6 — `--mock` mode and final verification. The client is now a
   ratatui dashboard with a menu, dot-aligned status panel, scrolling log console,
   background driver installation, UAC gate and a cleanup modal. `inquire` is gone.
@@ -25,10 +25,13 @@ and record important architecture decisions as they are made.
   with refreshed statuses.
   Shutdown: `net::NetworkService` owns a cancellation token and a join set; every
   exit path cancels it and waits for tasks to drop their sockets.
-- **Next Step:** Continue the Windows polish series: menu/lifecycle split, safe
-  log deletion, graceful network shutdown, driver fixes and clipboard/version
-  extras. After that, validate on real **Windows 11** (full checklist below).
-  Server/relay work (`doip-server`) remains postponed.
+  Drivers & extras: Npcap is uninstalled via `NPFInstall.exe -u`; the Loopback
+  adapter is created with `newdev!UpdateDriverForPlugAndPlayDevicesW`
+  (`netloop.inf` + `*msloop`); the Car code is copied to the clipboard on
+  `Enter`; the header shows the package version (`v0.1.0`).
+- **Next Step:** Embed the custom application icon (Task 5), then validate the
+  whole flow on real **Windows 11** (full checklist below). Server/relay work
+  (`doip-server`) remains postponed.
 - **Repo state:** branch `main`; stages 1-5 are committed as
   `wip: stage N completed`, stage 6 as the final dashboard commit, followed by
   `fix(ui): improve hotkeys readability with yellow/cyan colors`,
@@ -113,7 +116,8 @@ driver flow is validated.
 
 - **Layout:** header (`=== DoIP Remote ===` plus key hints), middle row split
   70/30 into the menu and the dot-aligned status panel, bottom `[ ЛОГИ ]`
-  console. Modals are drawn on top. The header title is **magenta and bold**.
+  console. Modals are drawn on top. The header title is **magenta and bold**;
+  the package version (`v0.1.0`) is shown in the top-right corner.
 - **Key hints:** built from the `HOTKEYS` table in `ui.rs` and rendered as
   `[ключ] - действие • ...`; key caps are bold yellow, separators and action
   descriptions are cyan so the row stays readable on a dark terminal.
@@ -139,27 +143,32 @@ driver flow is validated.
   colour-coded; admin warnings start with a bold red `[!]` marker. The file layer
   is reloadable: cleanup disables it while the in-memory mirror keeps working.
 - **Install (Windows):** a background task streams the Npcap 1.80 download with
-  percentage progress in the log, runs the installer **without** `/S`, captures
-  `InfDefaultInstall.exe %SystemRoot%\INF\netloop.inf` stdout/stderr into the
-  log, then sends a completion event. The menu is locked meanwhile and statuses
-  refresh afterwards. Without admin rights the action only logs an instruction
-  to restart as Administrator.
+  percentage progress in the log, runs the installer **without** `/S`, then
+  creates the KM-TEST Loopback adapter via
+  `newdev.dll!UpdateDriverForPlugAndPlayDevicesW` (`netloop.inf`, hardware ID
+  `*msloop`, `INSTALLFLAG_FORCE | INSTALLFLAG_NONINTERACTIVE`), reporting the
+  reboot flag. The menu is locked meanwhile and statuses refresh afterwards.
+  Without admin rights the action only logs an instruction to restart as
+  Administrator.
 - **Car:** generates a `DT1-...` code (server `"auto"`), logs it and opens a
-  popup where the code is rendered in green.
+  popup where the code is rendered in green. `Enter` copies it to the system
+  clipboard and logs `[INFO] Code copied to clipboard!`; `Esc` closes the popup.
 - **Diag:** opens a popup; typed/pasted code is parsed on `Enter`, and the
   target IP, DoIP port and relay server are logged.
-- **Delete drivers and logs:** opens a `Y/N` confirmation popup. `Y` calls the
-  driver-removal routine, swaps the file log writer for a sink, drops the old
-  appender guard (closing the file handle) and deletes `doip-remote.log`; the app
-  **keeps running** and logs `[INFO] Logging disabled, log file deleted`. Driver,
-  log-file and connection statuses are refreshed immediately.
+- **Delete drivers and logs:** opens a `Y/N` confirmation popup. `Y` runs the
+  Npcap uninstaller (`C:\Program Files\Npcap\NPFInstall.exe -u`, waited for),
+  swaps the file log writer for a sink, drops the old appender guard (closing the
+  file handle) and deletes `doip-remote.log`; the app **keeps running** and logs
+  `[INFO] Logging disabled, log file deleted`. Driver, log-file and connection
+  statuses are refreshed immediately. The Loopback device is left in place.
 - **Finish diagnostics:** exits the application and cancels the network token;
   active tasks stop and their sockets are closed before the process ends.
 - **`--mock`:** forces admin rights and both driver statuses green so the
   dashboard can be previewed on Linux. The network status is deliberately not
   faked and stays red `[ОТКЛЮЧЕНО]` until the server exists.
-- Networking and driver removal are **stubs**; driver detection/installation is
-  real only on Windows.
+- Networking is a **stub**; driver detection, Npcap installation/uninstallation
+  and Loopback creation are real only on Windows (compile-checked, not yet
+  runtime-tested).
 
 ## Commands
 
@@ -179,22 +188,22 @@ cargo check -p doip-client --target x86_64-pc-windows-msvc
 cargo clippy -p doip-client --all-targets --target x86_64-pc-windows-msvc -- -D warnings
 ```
 
-## Last verification (2026-11-17)
+## Last verification (2026-11-21)
 
 - `cargo build --workspace` — OK.
-- `cargo test --workspace` — 18 `doip-client` + 17 `doip-core` tests + 1 doctest,
+- `cargo test --workspace` — 29 `doip-client` + 17 `doip-core` tests + 1 doctest,
   all passing.
 - `cargo clippy --workspace --all-targets -- -D warnings` — clean.
-- `cargo fmt --all --check` and `cargo doc` with warnings denied — clean.
 - Windows target code: `cargo check`/`clippy` for
-  `x86_64-pc-windows-msvc` — clean (compile only, not runtime-tested).
-- Linux PTY runs — OK: red status dashboard; menu navigation; Tab/PgUp/PgDn log
-  focus and scrolling; Car code generation; Diag popup and parse-error log;
-  Install admin gate; cleanup modal (cancel + confirm, log file deleted);
-  `--mock` dashboard with green admin/drivers and red `[ОТКЛЮЧЕНО]`; Ctrl+C
-  restores the alternate screen, cursor and raw mode. The hint row renders bold
-  yellow `[ключ]` caps and cyan descriptions (SGR `38;5;3` / `38;5;6`).
-- Actual driver detection/installation on real Windows 11 is **not yet tested**.
+  `x86_64-pc-windows-msvc` — clean (compile only, not runtime-tested), including
+  `newdev!UpdateDriverForPlugAndPlayDevicesW` and `arboard`.
+- Linux PTY runs — OK: non-admin dashboard with red statuses and bold red `[!]`,
+  `Log File [EXISTS]`, magenta bold header with `v0.1.0`, green Car-code popup,
+  clipboard copy on `Enter` (`Code copied to clipboard!`), separate cleanup/exit
+  entries, cleanup deletes the log while the app stays alive, graceful Ctrl+C
+  shutdown (`Сетевые задачи остановлены, сокеты закрыты`).
+- Actual driver detection/installation/uninstallation and the embedded icon on
+  real Windows 11 are **not yet tested**.
 
 ## Environment notes
 
@@ -207,6 +216,8 @@ cargo clippy -p doip-client --all-targets --target x86_64-pc-windows-msvc -- -D 
 - Workspace `rust-version` is `1.89`; CI uses the stable channel.
 - `reqwest` is a Windows-only target dependency; Linux builds do not compile it.
   Driver installation requires administrator rights on Windows.
+- Windows-only crates: `windows 0.62` (newdev API) and `arboard 3.7` (clipboard,
+  also cross-platform). `tokio-util 0.7` provides `CancellationToken`.
 - TUI stack: `ratatui 0.26` + `crossterm 0.27`; logs use `tracing-appender 0.2`.
   `inquire` was removed in stage 1.
 
@@ -229,15 +240,20 @@ and its driver flow on real Windows 11:
 - [ ] `cargo build --workspace` and `cargo test --workspace` on Windows 11.
 - [ ] Confirm the dashboard renders correctly in Windows Terminal (colours,
       borders, Cyrillic, `✓`).
-- [ ] Run as a normal user without Npcap/Loopback: confirm the yellow admin
-      status, red driver statuses and the admin warning on Install.
+- [ ] Run as a normal user without Npcap/Loopback: confirm the red admin status,
+      red driver statuses and the admin warning on Install.
 - [ ] Install drivers from the menu as administrator; follow the interactive
       Npcap wizard and check UAC behaviour and installer exit codes.
-- [ ] Confirm download progress and `InfDefaultInstall` output appear in the log
-      panel and in `doip-remote.log`.
+- [ ] Confirm download progress and the `UpdateDriverForPlugAndPlayDevicesW`
+      result/reboot flag appear in the log panel and in `doip-remote.log`.
 - [ ] Confirm Npcap appears at `%SystemRoot%\System32\Npcap\wpcap.dll`.
 - [ ] Confirm the KM-TEST adapter appears and is found by `Get-NetAdapter`.
 - [ ] Confirm the status turns green after installation without a restart.
+- [ ] Confirm the Car popup copies the code on `Enter` (clipboard contains a
+      `DT1-...` string and the log says `Code copied to clipboard!`).
+- [ ] Confirm `v0.1.0` appears in the header's top-right corner.
+- [ ] Confirm "Delete drivers and logs" runs `NPFInstall.exe -u`, clears the Npcap
+      status and deletes the log without a sharing violation.
 - [ ] Check detection on a localized Windows install (`Get-NetAdapter`/`netsh`
       output may be localized; adapter names/markers should still match).
 - [ ] Test failure paths: declined UAC, canceled Npcap wizard, missing

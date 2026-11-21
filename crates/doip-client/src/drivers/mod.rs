@@ -14,6 +14,7 @@
 use std::{
     fs::File,
     io::{Read, Write},
+    os::windows::ffi::OsStrExt,
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
 };
@@ -79,10 +80,43 @@ pub enum DriverError {
 
 /// Removes the L2 drivers.
 ///
-/// Not implemented yet: this is the stub the cleanup menu item calls before
-/// deleting the log file.
-pub fn remove_all() {
-    tracing::warn!("Удаление драйверов пока не реализовано (заглушка).");
+/// On Windows this runs the official Npcap uninstaller
+/// (`C:\Program Files\Npcap\NPFInstall.exe -u`) and waits for it to finish.
+/// The client never opens Npcap files: detection only checks whether `wpcap.dll`
+/// exists, so no capture handle can keep the uninstaller from replacing it.
+#[cfg(target_os = "windows")]
+pub fn remove_all() -> Result<(), DriverError> {
+    let uninstaller = PathBuf::from(NPCAP_UNINSTALLER);
+
+    if uninstaller.is_file() {
+        tracing::info!("Запуск {} -u ...", uninstaller.display());
+        let status = Command::new(&uninstaller).arg("-u").status()?;
+
+        if !status.success() {
+            return Err(DriverError::InstallerFailed {
+                name: "Npcap uninstall",
+                status,
+            });
+        }
+
+        tracing::info!("[OK] Npcap удалён.");
+    } else {
+        tracing::info!("Npcap не установлен, удалять нечего.");
+    }
+
+    // The KM-TEST adapter lives in the driver store and is harmless without a
+    // capture session; its removal path is not wired yet.
+    tracing::info!("Адаптер Loopback оставлен без изменений.");
+    Ok(())
+}
+
+/// Removes the L2 drivers.
+///
+/// The L2 drivers are Windows-only, so this is a no-op elsewhere.
+#[cfg(not(target_os = "windows"))]
+pub fn remove_all() -> Result<(), DriverError> {
+    tracing::warn!("Удаление драйверов поддерживается только на Windows.");
+    Ok(())
 }
 
 /// Checks which drivers are currently installed.
@@ -188,6 +222,10 @@ pub fn is_admin() -> bool {
 
 #[cfg(target_os = "windows")]
 const NPCAP_DOWNLOAD_URL: &str = "https://npcap.com/dist/npcap-1.80.exe";
+
+/// Official Npcap uninstaller; `-u` removes the driver and the service.
+#[cfg(target_os = "windows")]
+const NPCAP_UNINSTALLER: &str = r"C:\Program Files\Npcap\NPFInstall.exe";
 
 #[cfg(any(target_os = "windows", test))]
 const LOOPBACK_MARKERS: [&str; 2] = ["loopback", "km-test"];
@@ -307,45 +345,64 @@ fn download_npcap(destination: &Path) -> Result<(), DriverError> {
     Ok(())
 }
 
+/// Installs the Microsoft KM-TEST Loopback Adapter through `newdev.dll`.
+///
+/// `InfDefaultInstall.exe` only stages the INF; it does not create the device.
+/// `UpdateDriverForPlugAndPlayDevicesW` performs the full "have disk" install
+/// and binds the `*msloop` hardware ID to `netloop.inf`.
 #[cfg(target_os = "windows")]
 fn install_loopback() -> Result<(), DriverError> {
-    let inf_default_install = windows_dir().join("System32").join("InfDefaultInstall.exe");
+    use windows::core::{BOOL, PCWSTR};
+    use windows::Win32::Devices::DeviceAndDriverInstallation::{
+        UpdateDriverForPlugAndPlayDevicesW, INSTALLFLAG_FORCE, INSTALLFLAG_NONINTERACTIVE,
+    };
+
     let netloop_inf = windows_dir().join("INF").join("netloop.inf");
+    if !netloop_inf.is_file() {
+        return Err(DriverError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("{} not found", netloop_inf.display()),
+        )));
+    }
+
+    let inf_path: Vec<u16> = netloop_inf
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let hardware_id: Vec<u16> = "*msloop".encode_utf16().chain(std::iter::once(0)).collect();
+
+    let flags = INSTALLFLAG_FORCE | INSTALLFLAG_NONINTERACTIVE;
+    let mut reboot_required = BOOL::default();
 
     tracing::info!(
-        "Запуск {} {}",
-        inf_default_install.display(),
+        "Установка Loopback через UpdateDriverForPlugAndPlayDevicesW ({}) ...",
         netloop_inf.display()
     );
 
-    let output = Command::new(&inf_default_install)
-        .arg(&netloop_inf)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()?;
+    // SAFETY: both strings are NUL-terminated UTF-16 buffers that outlive the
+    // call; `reboot_required` points to a valid BOOL for the duration.
+    let result = unsafe {
+        UpdateDriverForPlugAndPlayDevicesW(
+            None,
+            PCWSTR::from_raw(hardware_id.as_ptr()),
+            PCWSTR::from_raw(inf_path.as_ptr()),
+            flags,
+            Some(&mut reboot_required),
+        )
+    };
 
-    log_installer_output("InfDefaultInstall", &output.stdout);
-    log_installer_output("InfDefaultInstall (stderr)", &output.stderr);
-
-    if output.status.success() {
-        tracing::info!("[OK] KM-TEST Loopback Adapter установлен.");
-        Ok(())
-    } else {
-        Err(DriverError::InstallerFailed {
-            name: "Loopback",
-            status: output.status,
-        })
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn log_installer_output(source: &str, bytes: &[u8]) {
-    for line in String::from_utf8_lossy(bytes)
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-    {
-        tracing::info!("{source}: {line}");
+    match result {
+        Ok(()) => {
+            if reboot_required.as_bool() {
+                tracing::info!("[!] Для завершения установки Loopback нужна перезагрузка.");
+            }
+            tracing::info!("[OK] KM-TEST Loopback Adapter установлен.");
+            Ok(())
+        }
+        Err(error) => Err(DriverError::Io(std::io::Error::other(format!(
+            "UpdateDriverForPlugAndPlayDevicesW failed: {error}"
+        )))),
     }
 }
 
