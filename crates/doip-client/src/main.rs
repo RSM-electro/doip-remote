@@ -384,6 +384,15 @@ fn confirm_cleanup(app: &mut App, logger: &mut Option<logging::Logger>) {
         Err(error) => warn!("Удаление драйверов: {error}"),
     }
 
+    // Re-probe immediately after the driver cleanup: the status panel must
+    // reflect what is actually left in the system, not a cached "OK" flag.
+    refresh_driver_status(app);
+    info!(
+        "Npcap — {}, Loopback — {}",
+        ready_tag(app.npcap_status),
+        ready_tag(app.loopback_status)
+    );
+
     let deletion = match logger.as_mut() {
         Some(logger) => logger.delete_log_file(),
         None => std::fs::remove_file(logging::log_file_path()).or_else(|error| {
@@ -408,11 +417,19 @@ fn confirm_cleanup(app: &mut App, logger: &mut Option<logging::Logger>) {
         }
     }
 
-    let status = drivers::check_all();
-    app.set_driver_status(status.npcap_installed, status.loopback_installed);
+    // Final refresh after all cleanup steps (log deletion can take a moment);
+    // this is what makes `Loopback [НЕТ]` / `Npcap [НЕТ]` visible in the panel.
+    refresh_driver_status(app);
     app.connection_status = ConnectionStatus::Disconnected;
 
     info!("Очистка завершена. Приложение продолжает работу.");
+}
+
+/// Re-runs the driver probe and pushes the result into `AppState` so the UI
+/// status panel always matches the system state.
+fn refresh_driver_status(app: &mut App) {
+    let status = drivers::check_all();
+    app.set_driver_status(status.npcap_installed, status.loopback_installed);
 }
 
 fn ready_tag(ready: bool) -> &'static str {

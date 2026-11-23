@@ -9,7 +9,7 @@ and record important architecture decisions as they are made.
 ## Current Status (обновляй этот блок каждый день)
 
 - **Date:** 2026-11-23
-- **Phase:** Windows 11 validation; Loopback installation failure fixed and
+- **Phase:** Windows 11 validation; Loopback install **and removal** fixed and
   verified on the target machine.
 - **Done:** Stage 6/6 — `--mock` mode and final verification. The client is now a
   ratatui dashboard with a menu, dot-aligned status panel, scrolling log console,
@@ -26,11 +26,13 @@ and record important architecture decisions as they are made.
   with refreshed statuses.
   Shutdown: `net::NetworkService` owns a cancellation token and a join set; every
   exit path cancels it and waits for tasks to drop their sockets.
-  Drivers & extras: Npcap is uninstalled via `NPFInstall.exe -u`; the Loopback
+  Drivers & extras: Npcap is uninstalled via `NPFInstall.exe -n -u` (with a
+  stale-file fallback); the Loopback
   adapter is created by first registering a root-enumerated `ROOT\NET\<n>`
   devnode with HardwareID `*MSLOOP` (SetupAPI) and then calling
-  `newdev!UpdateDriverForPlugAndPlayDevicesW` with `%SystemRoot%\INF\netloop.inf`;
-  the Car code is copied to the clipboard on `Enter`; the header shows the
+  `newdev!UpdateDriverForPlugAndPlayDevicesW` with `%SystemRoot%\INF\netloop.inf`
+  and removed with `SetupDiRemoveDevice`; the Car code is copied to the clipboard
+  on `Enter`; the header shows the
   package version (`v0.1.0`).
   **Windows 11 fix (2026-11-23):** the previous code called
   `UpdateDriverForPlugAndPlayDevicesW` without creating a device, so setupapi
@@ -44,14 +46,16 @@ and record important architecture decisions as they are made.
   PNG-compressed `.ico` (16/32/48/64/128/256) and links it through
   `embed-resource` for Windows targets, so Explorer and the taskbar show it.
 - **Next Step:** Finish the remaining items of the Windows 11 checklist below
-  (icon rendering, non-admin warning, cleanup path, localized names); the
-  Loopback install path is now green. Server/relay work (`doip-server`) remains
+  (icon rendering, non-admin warning, localized names); the Loopback install and
+  cleanup paths are now green. Server/relay work (`doip-server`) remains
   postponed.
 - **Repo state:** branch `main`; stages 1-5 are committed as
   `wip: stage N completed`, stage 6 as the final dashboard commit, followed by
   `fix(ui): improve hotkeys readability with yellow/cyan colors`,
   `fix(state): force connection status to Disconnected until server is implemented`
-  and the Windows-polish checkpoints.
+  and the Windows-polish checkpoints, then
+  `fix(drivers): resolve Loopback installation failure (0xE000020B) via api` and
+  `fix(drivers): actually remove Loopback adapter and refresh UI status`.
 
 ## Architecture
 
@@ -178,11 +182,17 @@ driver flow is validated.
 - **Diag:** opens a popup; typed/pasted code is parsed on `Enter`, and the
   target IP, DoIP port and relay server are logged.
 - **Delete drivers and logs:** opens a `Y/N` confirmation popup. `Y` runs the
-  Npcap uninstaller (`C:\Program Files\Npcap\NPFInstall.exe -u`, waited for),
-  swaps the file log writer for a sink, drops the old appender guard (closing the
-  file handle) and deletes `doip-remote.log`; the app **keeps running** and logs
-  `[INFO] Logging disabled, log file deleted`. Driver, log-file and connection
-  statuses are refreshed immediately. The Loopback device is left in place.
+  Npcap uninstaller (`C:\Program Files\Npcap\NPFInstall.exe -n -u`, waited for),
+  removes the KM-TEST Loopback devnodes (`*MSLOOP`) via `SetupDiRemoveDevice`,
+  then swaps the file log writer for a sink, drops the old appender guard
+  (closing the file handle) and deletes `doip-remote.log`; the app **keeps
+  running**. Npcap and Loopback removals are independent: a failed Npcap
+  uninstall no longer skips the Loopback adapter. When the `npcap` service is
+  gone but `%SystemRoot%\System32\Npcap` remains (NPFInstall can report success
+  yet leave `wpcap.dll`), the stale folder is deleted. The driver statuses are
+  re-probed immediately and again after log deletion, so the panel shows
+  `Npcap [НЕТ]` / `Loopback [НЕТ]`; the refreshed values are logged before the
+  file writer is disabled.
 - **Finish diagnostics:** exits the application and cancels the network token;
   active tasks stop and their sockets are closed before the process ends.
 - **`--mock`:** forces admin rights and both driver statuses green so the
@@ -233,8 +243,14 @@ cargo clippy -p doip-client --all-targets --target x86_64-pc-windows-msvc -- -D 
   `Loopback [OK]`. `Get-NetAdapter` listed `Ethernet 3` /
   `Microsoft KM-TEST Loopback Adapter`, PnP showed `ROOT\NET\0001`, and
   `setupapi.dev.log` ended the section with `Exit status: SUCCESS`.
-- Npcap uninstall and the embedded icon on real Windows 11 are **not yet tested
-  in this session** (Npcap was already installed and skipped).
+- Windows 11 (elevated) cleanup run: pressed "Удалить драйверы и логи" and
+  confirmed `Y`. Log showed
+  `[OK] Loopback adapter removed successfully (ROOT\NET\0001).`; `Get-NetAdapter`
+  and `Get-PnpDevice` no longer listed the adapter, and the stale Npcap files
+  were removed. A second install→cleanup cycle reproduced the result with
+  statuses re-probed to `[НЕТ]`/`[НЕТ]`. Screenshot:
+  `%TEMP%\opencode\doip_cleanup_screen.png`.
+- The embedded icon on real Windows 11 is **not yet visually confirmed**.
 
 ## Environment notes
 
@@ -295,8 +311,9 @@ and its driver flow on real Windows 11:
 - [ ] Confirm the Car popup copies the code on `Enter` (clipboard contains a
       `DT1-...` string and the log says `Code copied to clipboard!`).
 - [ ] Confirm `v0.1.0` appears in the header's top-right corner.
-- [ ] Confirm "Delete drivers and logs" runs `NPFInstall.exe -u`, clears the Npcap
-      status and deletes the log without a sharing violation.
+- [x] Confirm "Delete drivers and logs" runs `NPFInstall.exe -n -u`, removes the
+      KM-TEST adapter, clears both statuses and deletes the log without a
+      sharing violation (`ROOT\NET\0001` and `wpcap.dll` both gone afterwards).
 - [ ] Check detection on a localized Windows install (`Get-NetAdapter`/`netsh`
       output may be localized; adapter names/markers should still match).
 - [ ] Test failure paths: declined UAC, canceled Npcap wizard, missing

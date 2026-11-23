@@ -81,33 +81,102 @@ pub enum DriverError {
 /// Removes the L2 drivers.
 ///
 /// On Windows this runs the official Npcap uninstaller
-/// (`C:\Program Files\Npcap\NPFInstall.exe -u`) and waits for it to finish.
-/// The client never opens Npcap files: detection only checks whether `wpcap.dll`
-/// exists, so no capture handle can keep the uninstaller from replacing it.
+/// (`C:\Program Files\Npcap\NPFInstall.exe -n -u`) and waits for it to finish,
+/// then removes the KM-TEST Loopback devnode that was created from
+/// `netloop.inf` with the `*MSLOOP` hardware ID. The client never opens Npcap
+/// files: detection only checks whether `wpcap.dll` exists, so no capture
+/// handle can keep the uninstaller from replacing it.
+///
+/// Both removals are attempted independently: a failed Npcap uninstall must
+/// never prevent the Loopback adapter from being removed.
 #[cfg(target_os = "windows")]
 pub fn remove_all() -> Result<(), DriverError> {
+    let npcap = uninstall_npcap();
+    let loopback = remove_loopback();
+
+    match (npcap, loopback) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(npcap_error), Err(loopback_error)) => {
+            tracing::warn!("Loopback removal also failed: {loopback_error}");
+            Err(npcap_error)
+        }
+    }
+}
+
+/// Runs the official Npcap uninstaller, then deletes any driver files it left
+/// behind once the `npcap` service is gone.
+#[cfg(target_os = "windows")]
+fn uninstall_npcap() -> Result<(), DriverError> {
     let uninstaller = PathBuf::from(NPCAP_UNINSTALLER);
 
-    if uninstaller.is_file() {
-        tracing::info!("Запуск {} -u ...", uninstaller.display());
-        let status = Command::new(&uninstaller).arg("-u").status()?;
-
-        if !status.success() {
-            return Err(DriverError::InstallerFailed {
+    let failure = if uninstaller.is_file() {
+        // The original installer uses `-n -u`; plain `-u` can return -1 on
+        // Windows 11.
+        tracing::info!("Запуск {} -n -u ...", uninstaller.display());
+        match Command::new(&uninstaller).args(["-n", "-u"]).status() {
+            Ok(status) if status.success() => {
+                tracing::info!("[OK] Npcap удалён.");
+                None
+            }
+            Ok(status) => Some(DriverError::InstallerFailed {
                 name: "Npcap uninstall",
                 status,
-            });
+            }),
+            Err(error) => Some(DriverError::Io(error)),
         }
-
-        tracing::info!("[OK] Npcap удалён.");
     } else {
-        tracing::info!("Npcap не установлен, удалять нечего.");
+        tracing::info!("Npcap uninstaller not found; checking for stale files.");
+        None
+    };
+
+    // NPFInstall can report success yet leave `wpcap.dll` behind, and fails with
+    // "Couldn't get an interface pointer to INSECURE_NPCAP" when the LWF
+    // component was already unregistered. In both cases the driver is gone once
+    // its service is missing: delete the leftovers so detection (and therefore
+    // the UI) reports Npcap as absent.
+    if !npcap_service_present() {
+        remove_stale_npcap_files()?;
     }
 
-    // The KM-TEST adapter lives in the driver store and is harmless without a
-    // capture session; its removal path is not wired yet.
-    tracing::info!("Адаптер Loopback оставлен без изменений.");
-    Ok(())
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// Deletes the `%SystemRoot%\System32\Npcap` folder left behind by Npcap.
+#[cfg(target_os = "windows")]
+fn remove_stale_npcap_files() -> Result<(), DriverError> {
+    let stale_dir = windows_dir().join("System32").join("Npcap");
+    match std::fs::remove_dir_all(&stale_dir) {
+        Ok(()) => {
+            tracing::info!(
+                "[OK] Stale Npcap files removed from {}.",
+                stale_dir.display()
+            );
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            tracing::info!("Npcap files already absent.");
+            Ok(())
+        }
+        Err(error) => Err(DriverError::Io(error)),
+    }
+}
+
+/// Returns `true` when the `npcap` driver service still exists.
+///
+/// `sc.exe` exits with 1060 when the service is not registered; any other
+/// outcome is treated as "present" so a query failure never deletes live files.
+#[cfg(target_os = "windows")]
+fn npcap_service_present() -> bool {
+    Command::new("sc.exe")
+        .args(["query", "npcap"])
+        .output()
+        .map_or(true, |output| {
+            output.status.success() || output.status.code() != Some(1060)
+        })
 }
 
 /// Removes the L2 drivers.
@@ -520,6 +589,111 @@ fn msloop_devnode_exists() -> Result<bool, DriverError> {
     }
 
     Ok(false)
+}
+
+/// Removes every network devnode whose HardwareID contains `*MSLOOP`, i.e.
+/// the Microsoft KM-TEST Loopback adapter created from `netloop.inf`.
+#[cfg(target_os = "windows")]
+fn remove_loopback() -> Result<(), DriverError> {
+    use windows::core::{Error as WinError, PCWSTR};
+    use windows::Win32::Devices::DeviceAndDriverInstallation::{
+        SetupDiEnumDeviceInfo, SetupDiGetClassDevsW, SetupDiGetDeviceInstanceIdW,
+        SetupDiGetDeviceRegistryPropertyW, SetupDiRemoveDevice, GUID_DEVCLASS_NET,
+        SETUP_DI_GET_CLASS_DEVS_FLAGS, SPDRP_HARDWAREID, SP_DEVINFO_DATA,
+    };
+
+    // SAFETY: `PCWSTR::null()` is a valid null enumerator; the GUID is static.
+    let raw = unsafe {
+        SetupDiGetClassDevsW(
+            Some(&GUID_DEVCLASS_NET),
+            PCWSTR::null(),
+            None,
+            SETUP_DI_GET_CLASS_DEVS_FLAGS(0),
+        )
+    }
+    .map_err(|error| setup_error("SetupDiGetClassDevsW failed", error))?;
+    let set = DeviceInfoSet(raw);
+
+    let mut targets = Vec::new();
+    let mut index = 0_u32;
+    loop {
+        let mut data = SP_DEVINFO_DATA {
+            cbSize: std::mem::size_of::<SP_DEVINFO_DATA>() as u32,
+            ..Default::default()
+        };
+
+        // SAFETY: `data` is correctly initialized and `index` is an ordinal.
+        if unsafe { SetupDiEnumDeviceInfo(set.as_raw(), index, &mut data) }.is_err() {
+            break;
+        }
+        index += 1;
+
+        let mut buffer = [0_u16; 128];
+        let bytes = unsafe {
+            std::slice::from_raw_parts_mut(buffer.as_mut_ptr().cast::<u8>(), buffer.len() * 2)
+        };
+
+        // SAFETY: `bytes` points to `buffer`'s storage and matches its length.
+        if unsafe {
+            SetupDiGetDeviceRegistryPropertyW(
+                set.as_raw(),
+                &data,
+                SPDRP_HARDWAREID,
+                None,
+                Some(bytes),
+                None,
+            )
+        }
+        .is_ok()
+            && String::from_utf16_lossy(&buffer)
+                .to_ascii_uppercase()
+                .contains("*MSLOOP")
+        {
+            targets.push(data);
+        }
+    }
+
+    if targets.is_empty() {
+        tracing::info!("Loopback-адаптер не найден, удалять нечего.");
+        return Ok(());
+    }
+
+    for mut data in targets {
+        let mut id_buffer = [0_u16; 256];
+        let mut required = 0_u32;
+        let instance = if unsafe {
+            SetupDiGetDeviceInstanceIdW(
+                set.as_raw(),
+                &data,
+                Some(&mut id_buffer),
+                Some(&mut required),
+            )
+        }
+        .is_ok()
+        {
+            let len = id_buffer
+                .iter()
+                .position(|unit| *unit == 0)
+                .unwrap_or(id_buffer.len());
+            String::from_utf16_lossy(&id_buffer[..len])
+        } else {
+            format!("DevInst {}", data.DevInst)
+        };
+
+        // SAFETY: `data` describes a device in `set`; SetupDiRemoveDevice
+        // invalidates it on success, which is why it is passed by `&mut`.
+        let removed = unsafe { SetupDiRemoveDevice(set.as_raw(), &mut data) };
+        if !removed.as_bool() {
+            return Err(setup_error(
+                &format!("SetupDiRemoveDevice failed for {instance}"),
+                WinError::from_thread(),
+            ));
+        }
+
+        tracing::info!("[OK] Loopback adapter removed successfully ({instance}).");
+    }
+
+    Ok(())
 }
 
 /// Picks the next free `ROOT\NET\<n>` instance number, mirroring the original
