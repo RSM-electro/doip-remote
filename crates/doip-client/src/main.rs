@@ -19,7 +19,7 @@ use std::{
     time::Duration,
 };
 
-use app::{App, ConnectionStatus, Focus, MenuItem};
+use app::{App, Focus, MenuItem};
 use colored::Colorize;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use doip_core::{Role, SessionCode};
@@ -370,12 +370,15 @@ fn accept_diag_code(input: &str) {
 }
 
 /// Handles the destructive menu entry: removes the drivers and deletes the log
-/// file, then keeps the application running so the refreshed statuses are
-/// visible.
+/// file, then **returns to the event loop** so the refreshed statuses stay on
+/// screen until the user chooses "Finish Diagnostics" or presses Ctrl+C.
 ///
-/// On Windows the log file cannot be deleted while `tracing-appender` still has
-/// it open. [`logging::Logger::delete_log_file`] swaps the file writer for a
-/// sink and drops the old appender guard before calling `remove_file`.
+/// This function never sets `app.should_quit`, never cancels the
+/// `CancellationToken` and never drops the tokio runtime. On Windows the log
+/// file cannot be deleted while `tracing-appender` still has it open, so
+/// [`logging::Logger::delete_log_file`] first swaps the file writer for a sink
+/// and drops the old appender guard; later log calls keep working via the
+/// in-memory UI layer and the no-op file writer.
 fn confirm_cleanup(app: &mut App, logger: &mut Option<logging::Logger>) {
     app.show_confirm_delete = false;
 
@@ -384,13 +387,13 @@ fn confirm_cleanup(app: &mut App, logger: &mut Option<logging::Logger>) {
         Err(error) => warn!("Удаление драйверов: {error}"),
     }
 
-    // Re-probe immediately after the driver cleanup: the status panel must
-    // reflect what is actually left in the system, not a cached "OK" flag.
-    refresh_driver_status(app);
+    // Re-probe while the file writer is still alive: these statuses are logged
+    // to `doip-remote.log` before it is removed.
+    let status = drivers::check_all();
     info!(
         "Npcap — {}, Loopback — {}",
-        ready_tag(app.npcap_status),
-        ready_tag(app.loopback_status)
+        ready_tag(status.npcap_installed),
+        ready_tag(status.loopback_installed)
     );
 
     let deletion = match logger.as_mut() {
@@ -406,30 +409,25 @@ fn confirm_cleanup(app: &mut App, logger: &mut Option<logging::Logger>) {
 
     match deletion {
         Ok(()) => {
-            app.set_log_file_exists(false);
             app.delete_log_on_exit = false;
             info!("Logging disabled, log file deleted");
         }
         Err(error) => {
             warn!("Не удалось удалить лог: {error}. Повторим при выходе.");
             app.delete_log_on_exit = true;
-            app.set_log_file_exists(logging::log_file_path().is_file());
         }
     }
 
-    // Final refresh after all cleanup steps (log deletion can take a moment);
-    // this is what makes `Loopback [НЕТ]` / `Npcap [НЕТ]` visible in the panel.
-    refresh_driver_status(app);
-    app.connection_status = ConnectionStatus::Disconnected;
+    // Final refresh after all cleanup steps. The log-file flag is read from
+    // disk so the panel reports `[MISSING]` only when the file is really gone.
+    let status = drivers::check_all();
+    app.apply_cleanup_status(
+        status.npcap_installed,
+        status.loopback_installed,
+        logging::log_file_path().is_file(),
+    );
 
     info!("Очистка завершена. Приложение продолжает работу.");
-}
-
-/// Re-runs the driver probe and pushes the result into `AppState` so the UI
-/// status panel always matches the system state.
-fn refresh_driver_status(app: &mut App) {
-    let status = drivers::check_all();
-    app.set_driver_status(status.npcap_installed, status.loopback_installed);
 }
 
 fn ready_tag(ready: bool) -> &'static str {

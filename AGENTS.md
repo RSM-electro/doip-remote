@@ -54,9 +54,10 @@ and record important architecture decisions as they are made.
   `fix(ui): improve hotkeys readability with yellow/cyan colors`,
   `fix(state): force connection status to Disconnected until server is implemented`
   and the Windows-polish checkpoints, then
-  `fix(drivers): resolve Loopback installation failure (0xE000020B) via api` and
-  `fix(drivers): actually remove Loopback adapter and refresh UI status` and
-  `style(ui): change header color to white`.
+  `fix(drivers): resolve Loopback installation failure (0xE000020B) via api`,
+  `fix(drivers): actually remove Loopback adapter and refresh UI status`,
+  `style(ui): change header color to white`, and
+  `fix(lifecycle): prevent app exit after driver cleanup, gracefully handle log deletion`.
 
 ## Architecture
 
@@ -187,13 +188,14 @@ driver flow is validated.
   removes the KM-TEST Loopback devnodes (`*MSLOOP`) via `SetupDiRemoveDevice`,
   then swaps the file log writer for a sink, drops the old appender guard
   (closing the file handle) and deletes `doip-remote.log`; the app **keeps
-  running**. Npcap and Loopback removals are independent: a failed Npcap
-  uninstall no longer skips the Loopback adapter. When the `npcap` service is
-  gone but `%SystemRoot%\System32\Npcap` remains (NPFInstall can report success
-  yet leave `wpcap.dll`), the stale folder is deleted. The driver statuses are
-  re-probed immediately and again after log deletion, so the panel shows
-  `Npcap [НЕТ]` / `Loopback [НЕТ]`; the refreshed values are logged before the
-  file writer is disabled.
+  running**. Cleanup never sets `should_quit`, never cancels the network
+  `CancellationToken` and never stops the tokio runtime — control returns to
+  the ratatui event loop. Npcap and Loopback removals are independent. When the
+  `npcap` service is gone but `%SystemRoot%\System32\Npcap` remains, the stale
+  folder is deleted. Driver/log statuses are re-probed after cleanup (from the
+  filesystem for `Log File`) so the panel shows `Npcap [НЕТ]` / `Loopback [НЕТ]`
+  / `Log File [MISSING]`. Later tracing calls continue through the in-memory UI
+  layer and a kept-alive no-op file writer.
 - **Finish diagnostics:** exits the application and cancels the network token;
   active tasks stop and their sockets are closed before the process ends.
 - **`--mock`:** forces admin rights and both driver statuses green so the
@@ -251,6 +253,10 @@ cargo clippy -p doip-client --all-targets --target x86_64-pc-windows-msvc -- -D 
   were removed. A second install→cleanup cycle reproduced the result with
   statuses re-probed to `[НЕТ]`/`[НЕТ]`. Screenshot:
   `%TEMP%\opencode\doip_cleanup_screen.png`.
+- Windows 11 lifecycle check: after cleanup the process remained running
+  (`exited=False` 8s later), `Log File` disappeared on disk, and the app
+  continued accepting input until an explicit quit. Cleanup never sets
+  `should_quit`, cancels the token, or shuts down the tokio runtime.
 - The embedded icon on real Windows 11 is **not yet visually confirmed**.
 
 ## Environment notes

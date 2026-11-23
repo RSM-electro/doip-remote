@@ -63,23 +63,25 @@ impl Logger {
     /// Order matters on Windows: the file writer is swapped for a sink and the
     /// old appender guard is dropped (closing the handle) before `remove_file`.
     pub fn delete_log_file(&mut self) -> io::Result<()> {
+        // Install the no-op file writer first. Keeping its guard alive for the
+        // rest of the session means every later `info!`/`warn!` is accepted by
+        // `tracing` without touching the deleted file; the UI mirror stays
+        // active regardless of the file-layer state.
         let (writer, sink_guard) = tracing_appender::non_blocking(io::sink());
         self.reload
             .reload(file_layer(writer))
             .map_err(|error| io::Error::other(error.to_string()))?;
+        self.sink_guard = Some(sink_guard);
 
         // Stops the old appender thread and closes the log file handle.
         drop(self.guard.take());
 
         let path = log_file_path();
-        let result = match std::fs::remove_file(&path) {
+        match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error),
-        };
-
-        self.sink_guard = Some(sink_guard);
-        result
+        }
     }
 }
 

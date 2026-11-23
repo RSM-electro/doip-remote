@@ -192,6 +192,23 @@ impl App {
         self.log_file_exists = exists;
     }
 
+    /// Applies the statuses observed after driver cleanup.
+    ///
+    /// Cleanup is deliberately non-destructive to the session: this only
+    /// refreshes the values shown in the status panel. In particular it never
+    /// touches [`App::should_quit`] or the confirmation popup state, so the main
+    /// event loop keeps running and the user decides when to exit.
+    pub fn apply_cleanup_status(&mut self, npcap: bool, loopback: bool, log_exists: bool) {
+        self.set_driver_status(npcap, loopback);
+        self.set_log_file_exists(log_exists);
+        self.connection_status = ConnectionStatus::Disconnected;
+
+        debug_assert!(
+            !self.should_quit,
+            "cleanup must never request application shutdown"
+        );
+    }
+
     /// Opens the popup that shows a freshly generated Car session code.
     pub fn set_session_code(&mut self, code: String) {
         self.session_code = Some(code);
@@ -273,6 +290,27 @@ mod tests {
 
         app.scroll_logs_down(100);
         assert_eq!(app.log_scroll, 0);
+    }
+
+    #[test]
+    fn cleanup_status_refresh_does_not_quit_the_app() {
+        let mut app = app();
+        app.set_driver_status(true, true);
+        app.set_log_file_exists(true);
+        app.connection_status = ConnectionStatus::Connected;
+        app.show_confirm_delete = true;
+
+        app.apply_cleanup_status(false, false, false);
+
+        assert!(!app.npcap_status);
+        assert!(!app.loopback_status);
+        assert!(!app.log_file_exists);
+        assert_eq!(app.connection_status, ConnectionStatus::Disconnected);
+        assert!(!app.should_quit, "cleanup must keep the event loop alive");
+        assert!(
+            app.show_confirm_delete,
+            "closing the modal is the caller's responsibility"
+        );
     }
 
     #[test]
