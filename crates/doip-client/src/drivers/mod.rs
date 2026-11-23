@@ -347,9 +347,17 @@ fn download_npcap(destination: &Path) -> Result<(), DriverError> {
 
 /// Installs the Microsoft KM-TEST Loopback Adapter through `newdev.dll`.
 ///
-/// `InfDefaultInstall.exe` only stages the INF; it does not create the device.
-/// `UpdateDriverForPlugAndPlayDevicesW` performs the full "have disk" install
-/// and binds the `*msloop` hardware ID to `netloop.inf`.
+/// `UpdateDriverForPlugAndPlayDevicesW` only *updates* the driver of a device
+/// that already exists. Calling it with `*msloop` while there is no devnode
+/// with that hardware ID fails with `0xE000020B` and the setupapi message
+/// `Unable to find any matching devices`. The original installer succeeded
+/// because it first created a root-enumerated `ROOT\NET\XXXX` devnode and
+/// registered it. We reproduce that sequence here:
+///
+/// 1. reuse an existing `*MSLOOP` devnode if a previous attempt left one;
+/// 2. otherwise create `ROOT\NET\<generated>` with `SPDRP_HARDWAREID=*MSLOOP`
+///    and register it via `DIF_REGISTERDEVICE`;
+/// 3. bind `netloop.inf` to that device with `UpdateDriverForPlugAndPlayDevicesW`.
 #[cfg(target_os = "windows")]
 fn install_loopback() -> Result<(), DriverError> {
     use windows::core::{BOOL, PCWSTR};
@@ -370,14 +378,23 @@ fn install_loopback() -> Result<(), DriverError> {
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
-    let hardware_id: Vec<u16> = "*msloop".encode_utf16().chain(std::iter::once(0)).collect();
+    let hardware_id: Vec<u16> = "*MSLOOP".encode_utf16().chain(std::iter::once(0)).collect();
+
+    // The driver-update API cannot create a device. Make sure a matching
+    // devnode exists first, otherwise it returns 0xE000020B.
+    if msloop_devnode_exists()? {
+        tracing::info!("Найден существующий devnode *MSLOOP, создание устройства пропущено.");
+    } else {
+        create_msloop_devnode()?;
+    }
 
     let flags = INSTALLFLAG_FORCE | INSTALLFLAG_NONINTERACTIVE;
     let mut reboot_required = BOOL::default();
 
     tracing::info!(
-        "Установка Loopback через UpdateDriverForPlugAndPlayDevicesW ({}) ...",
-        netloop_inf.display()
+        "Установка Loopback через UpdateDriverForPlugAndPlayDevicesW (INF: {}, HardwareID: *MSLOOP, flags: 0x{:X}) ...",
+        netloop_inf.display(),
+        flags.0
     );
 
     // SAFETY: both strings are NUL-terminated UTF-16 buffers that outlive the
@@ -400,10 +417,255 @@ fn install_loopback() -> Result<(), DriverError> {
             tracing::info!("[OK] KM-TEST Loopback Adapter установлен.");
             Ok(())
         }
-        Err(error) => Err(DriverError::Io(std::io::Error::other(format!(
-            "UpdateDriverForPlugAndPlayDevicesW failed: {error}"
-        )))),
+        Err(error) => Err(setup_error(
+            "UpdateDriverForPlugAndPlayDevicesW failed",
+            error,
+        )),
     }
+}
+
+/// A `HDEVINFO` handle that is always released with `SetupDiDestroyDeviceInfoList`.
+#[cfg(target_os = "windows")]
+struct DeviceInfoSet(windows::Win32::Devices::DeviceAndDriverInstallation::HDEVINFO);
+
+#[cfg(target_os = "windows")]
+impl DeviceInfoSet {
+    fn as_raw(&self) -> windows::Win32::Devices::DeviceAndDriverInstallation::HDEVINFO {
+        self.0
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for DeviceInfoSet {
+    fn drop(&mut self) {
+        // SAFETY: `self.0` is a valid info-set handle owned by this wrapper.
+        unsafe {
+            let _ =
+                windows::Win32::Devices::DeviceAndDriverInstallation::SetupDiDestroyDeviceInfoList(
+                    self.0,
+                );
+        }
+    }
+}
+
+/// Converts a SetupAPI error into a `DriverError` with the numeric code in the
+/// message, so `0xE000020B` and friends are visible in the UI log.
+#[cfg(target_os = "windows")]
+fn setup_error(context: &str, error: windows::core::Error) -> DriverError {
+    DriverError::Io(std::io::Error::other(format!(
+        "{context}: {error} (HRESULT 0x{:08X})",
+        error.code().0
+    )))
+}
+
+/// Returns `true` when a network devnode with HardwareID `*MSLOOP` already
+/// exists (for example, left behind by a failed previous attempt).
+#[cfg(target_os = "windows")]
+fn msloop_devnode_exists() -> Result<bool, DriverError> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Devices::DeviceAndDriverInstallation::{
+        SetupDiEnumDeviceInfo, SetupDiGetClassDevsW, SetupDiGetDeviceRegistryPropertyW,
+        GUID_DEVCLASS_NET, SETUP_DI_GET_CLASS_DEVS_FLAGS, SPDRP_HARDWAREID, SP_DEVINFO_DATA,
+    };
+
+    // SAFETY: `PCWSTR::null()` is a valid null enumerator; the class GUID is static.
+    let raw = unsafe {
+        SetupDiGetClassDevsW(
+            Some(&GUID_DEVCLASS_NET),
+            PCWSTR::null(),
+            None,
+            SETUP_DI_GET_CLASS_DEVS_FLAGS(0),
+        )
+    }
+    .map_err(|error| setup_error("SetupDiGetClassDevsW failed", error))?;
+    let set = DeviceInfoSet(raw);
+
+    let mut index = 0_u32;
+    loop {
+        let mut data = SP_DEVINFO_DATA {
+            cbSize: std::mem::size_of::<SP_DEVINFO_DATA>() as u32,
+            ..Default::default()
+        };
+
+        // SAFETY: `data` is correctly initialized and `index` is just an ordinal.
+        if unsafe { SetupDiEnumDeviceInfo(set.as_raw(), index, &mut data) }.is_err() {
+            break;
+        }
+        index += 1;
+
+        let mut buffer = [0_u16; 128];
+        let bytes = unsafe {
+            std::slice::from_raw_parts_mut(buffer.as_mut_ptr().cast::<u8>(), buffer.len() * 2)
+        };
+
+        // SAFETY: `bytes` points to `buffer`'s storage and matches its length.
+        if unsafe {
+            SetupDiGetDeviceRegistryPropertyW(
+                set.as_raw(),
+                &data,
+                SPDRP_HARDWAREID,
+                None,
+                Some(bytes),
+                None,
+            )
+        }
+        .is_ok()
+            && String::from_utf16_lossy(&buffer)
+                .to_ascii_uppercase()
+                .contains("*MSLOOP")
+        {
+            tracing::info!("Обнаружен devnode *MSLOOP (DevInst {}).", data.DevInst);
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+/// Picks the next free `ROOT\NET\<n>` instance number, mirroring the original
+/// installer (which created `ROOT\NET\0001` on a clean system).
+#[cfg(target_os = "windows")]
+fn next_root_net_instance() -> Result<u32, DriverError> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Devices::DeviceAndDriverInstallation::{
+        SetupDiEnumDeviceInfo, SetupDiGetClassDevsW, SetupDiGetDeviceInstanceIdW,
+        GUID_DEVCLASS_NET, SETUP_DI_GET_CLASS_DEVS_FLAGS, SP_DEVINFO_DATA,
+    };
+
+    let raw = unsafe {
+        SetupDiGetClassDevsW(
+            Some(&GUID_DEVCLASS_NET),
+            PCWSTR::null(),
+            None,
+            SETUP_DI_GET_CLASS_DEVS_FLAGS(0),
+        )
+    }
+    .map_err(|error| setup_error("SetupDiGetClassDevsW failed", error))?;
+    let set = DeviceInfoSet(raw);
+
+    let mut used = std::collections::HashSet::new();
+    let mut index = 0_u32;
+    loop {
+        let mut data = SP_DEVINFO_DATA {
+            cbSize: std::mem::size_of::<SP_DEVINFO_DATA>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: `data` is initialized correctly; `index` is an ordinal.
+        if unsafe { SetupDiEnumDeviceInfo(set.as_raw(), index, &mut data) }.is_err() {
+            break;
+        }
+        index += 1;
+
+        let mut id_buffer = [0_u16; 256];
+        let mut required = 0_u32;
+        // SAFETY: `id_buffer` is large enough for any device instance ID.
+        if unsafe {
+            SetupDiGetDeviceInstanceIdW(
+                set.as_raw(),
+                &data,
+                Some(&mut id_buffer),
+                Some(&mut required),
+            )
+        }
+        .is_ok()
+        {
+            let len = id_buffer
+                .iter()
+                .position(|unit| *unit == 0)
+                .unwrap_or(id_buffer.len());
+            let id = String::from_utf16_lossy(&id_buffer[..len]).to_ascii_uppercase();
+            if let Some(suffix) = id.strip_prefix("ROOT\\NET\\") {
+                if let Ok(number) = suffix.parse::<u32>() {
+                    used.insert(number);
+                }
+            }
+        }
+    }
+
+    let mut candidate = 0;
+    while used.contains(&candidate) {
+        candidate += 1;
+    }
+    Ok(candidate)
+}
+
+/// Creates a root-enumerated `ROOT\NET\<n>` devnode with the `*MSLOOP`
+/// hardware ID and registers it with the class installer.
+#[cfg(target_os = "windows")]
+fn create_msloop_devnode() -> Result<(), DriverError> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Devices::DeviceAndDriverInstallation::{
+        SetupDiCallClassInstaller, SetupDiCreateDeviceInfoList, SetupDiCreateDeviceInfoW,
+        SetupDiSetDeviceRegistryPropertyW, DIF_REGISTERDEVICE, GUID_DEVCLASS_NET,
+        SETUP_DI_DEVICE_CREATION_FLAGS, SPDRP_HARDWAREID, SP_DEVINFO_DATA,
+    };
+
+    // SAFETY: static class GUID, no parent window.
+    let raw = unsafe { SetupDiCreateDeviceInfoList(Some(&GUID_DEVCLASS_NET), None) }
+        .map_err(|error| setup_error("SetupDiCreateDeviceInfoList failed", error))?;
+    let set = DeviceInfoSet(raw);
+
+    // `DeviceName` must be a full device instance ID when DICD_GENERATE_ID is
+    // not used; "ROOT\NET" alone is rejected with ERROR_INVALID_DEVINST_NAME.
+    let instance = next_root_net_instance()?;
+    let instance_id = format!("ROOT\\NET\\{instance:04}");
+    let instance_id: Vec<u16> = instance_id
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut data = SP_DEVINFO_DATA {
+        cbSize: std::mem::size_of::<SP_DEVINFO_DATA>() as u32,
+        ..Default::default()
+    };
+
+    tracing::info!(
+        "Создание devnode {} с HardwareID *MSLOOP ...",
+        String::from_utf16_lossy(&instance_id[..instance_id.len() - 1])
+    );
+
+    // SAFETY: `instance_id` is NUL-terminated and outlives the call; `data` is
+    // initialized with the required cbSize.
+    unsafe {
+        SetupDiCreateDeviceInfoW(
+            set.as_raw(),
+            PCWSTR::from_raw(instance_id.as_ptr()),
+            &GUID_DEVCLASS_NET,
+            PCWSTR::null(),
+            None,
+            SETUP_DI_DEVICE_CREATION_FLAGS(0),
+            Some(&mut data),
+        )
+    }
+    .map_err(|error| setup_error("SetupDiCreateDeviceInfoW failed", error))?;
+
+    // REG_MULTI_SZ requires two trailing NULs.
+    let hardware_id: Vec<u16> = "*MSLOOP"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .chain(std::iter::once(0))
+        .collect();
+    let bytes = unsafe {
+        std::slice::from_raw_parts(hardware_id.as_ptr().cast::<u8>(), hardware_id.len() * 2)
+    };
+
+    // SAFETY: `bytes` is a UTF-16 REG_MULTI_SZ buffer owned by `hardware_id`.
+    unsafe {
+        SetupDiSetDeviceRegistryPropertyW(set.as_raw(), &mut data, SPDRP_HARDWAREID, Some(bytes))
+    }
+    .map_err(|error| setup_error("SetupDiSetDeviceRegistryPropertyW failed", error))?;
+
+    // SAFETY: `data` describes a device in `set`.
+    unsafe { SetupDiCallClassInstaller(DIF_REGISTERDEVICE, set.as_raw(), Some(&data)) }.map_err(
+        |error| {
+            setup_error(
+                "SetupDiCallClassInstaller(DIF_REGISTERDEVICE) failed",
+                error,
+            )
+        },
+    )?;
+
+    tracing::info!("[OK] Devnode ROOT\\NET создан (DevInst {}).", data.DevInst);
+    Ok(())
 }
 
 #[cfg(test)]

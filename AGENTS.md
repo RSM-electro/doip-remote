@@ -8,8 +8,9 @@ and record important architecture decisions as they are made.
 
 ## Current Status (обновляй этот блок каждый день)
 
-- **Date:** 2026-11-21
-- **Phase:** Windows polish and lifecycle work in progress (6 checkpoints).
+- **Date:** 2026-11-23
+- **Phase:** Windows 11 validation; Loopback installation failure fixed and
+  verified on the target machine.
 - **Done:** Stage 6/6 — `--mock` mode and final verification. The client is now a
   ratatui dashboard with a menu, dot-aligned status panel, scrolling log console,
   background driver installation, UAC gate and a cleanup modal. `inquire` is gone.
@@ -26,14 +27,25 @@ and record important architecture decisions as they are made.
   Shutdown: `net::NetworkService` owns a cancellation token and a join set; every
   exit path cancels it and waits for tasks to drop their sockets.
   Drivers & extras: Npcap is uninstalled via `NPFInstall.exe -u`; the Loopback
-  adapter is created with `newdev!UpdateDriverForPlugAndPlayDevicesW`
-  (`netloop.inf` + `*msloop`); the Car code is copied to the clipboard on
-  `Enter`; the header shows the package version (`v0.1.0`).
+  adapter is created by first registering a root-enumerated `ROOT\NET\<n>`
+  devnode with HardwareID `*MSLOOP` (SetupAPI) and then calling
+  `newdev!UpdateDriverForPlugAndPlayDevicesW` with `%SystemRoot%\INF\netloop.inf`;
+  the Car code is copied to the clipboard on `Enter`; the header shows the
+  package version (`v0.1.0`).
+  **Windows 11 fix (2026-11-23):** the previous code called
+  `UpdateDriverForPlugAndPlayDevicesW` without creating a device, so setupapi
+  reported `Unable to find any matching devices` / `0xE000020B`. The fix creates
+  the devnode first (next free `ROOT\NET` instance), reuses an existing
+  `*MSLOOP` node, and logs SetupAPI HRESULTs in the UI. Runtime-verified on
+  Windows 11: `ROOT\NET\0001` = Microsoft KM-TEST Loopback Adapter, visible in
+  `Get-NetAdapter`, UI status `Loopback [OK]`, setupapi section ends with
+  `Exit status: SUCCESS`.
   Icon: `crates/doip-client/build.rs` converts `icon.png` into a multi-size,
   PNG-compressed `.ico` (16/32/48/64/128/256) and links it through
   `embed-resource` for Windows targets, so Explorer and the taskbar show it.
-- **Next Step:** Validate the whole flow on real **Windows 11** (full checklist
-  below), including the embedded icon. Server/relay work (`doip-server`) remains
+- **Next Step:** Finish the remaining items of the Windows 11 checklist below
+  (icon rendering, non-admin warning, cleanup path, localized names); the
+  Loopback install path is now green. Server/relay work (`doip-server`) remains
   postponed.
 - **Repo state:** branch `main`; stages 1-5 are committed as
   `wip: stage N completed`, stage 6 as the final dashboard commit, followed by
@@ -149,12 +161,17 @@ driver flow is validated.
   is reloadable: cleanup disables it while the in-memory mirror keeps working.
 - **Install (Windows):** a background task streams the Npcap 1.80 download with
   percentage progress in the log, runs the installer **without** `/S`, then
-  creates the KM-TEST Loopback adapter via
-  `newdev.dll!UpdateDriverForPlugAndPlayDevicesW` (`netloop.inf`, hardware ID
-  `*msloop`, `INSTALLFLAG_FORCE | INSTALLFLAG_NONINTERACTIVE`), reporting the
-  reboot flag. The menu is locked meanwhile and statuses refresh afterwards.
-  Without admin rights the action only logs an instruction to restart as
-  Administrator.
+  installs the KM-TEST Loopback adapter. That step first ensures a devnode with
+  HardwareID `*MSLOOP` exists: an existing one is reused, otherwise the next
+  free `ROOT\NET\<n>` instance is created with
+  `SetupDiCreateDeviceInfoW` + `SetupDiSetDeviceRegistryPropertyW(SPDRP_HARDWAREID)`
+  + `SetupDiCallClassInstaller(DIF_REGISTERDEVICE)`. Only then
+  `newdev.dll!UpdateDriverForPlugAndPlayDevicesW` binds the dynamically resolved
+  `%SystemRoot%\INF\netloop.inf` (flags
+  `INSTALLFLAG_FORCE | INSTALLFLAG_NONINTERACTIVE`); the reboot flag and any
+  SetupAPI HRESULT are logged. The menu is locked meanwhile and statuses refresh
+  afterwards. Without admin rights the action only logs an instruction to
+  restart as Administrator.
 - **Car:** generates a `DT1-...` code (server `"auto"`), logs it and opens a
   popup where the code is rendered in green. `Enter` copies it to the system
   clipboard and logs `[INFO] Code copied to clipboard!`; `Esc` closes the popup.
@@ -172,8 +189,8 @@ driver flow is validated.
   dashboard can be previewed on Linux. The network status is deliberately not
   faked and stays red `[ОТКЛЮЧЕНО]` until the server exists.
 - Networking is a **stub**; driver detection, Npcap installation/uninstallation
-  and Loopback creation are real only on Windows (compile-checked, not yet
-  runtime-tested).
+  and Loopback creation are real only on Windows. Loopback creation was
+  runtime-tested on Windows 11; the other Windows paths were compile-checked.
 
 ## Commands
 
@@ -193,12 +210,13 @@ cargo check -p doip-client --target x86_64-pc-windows-msvc
 cargo clippy -p doip-client --all-targets --target x86_64-pc-windows-msvc -- -D warnings
 ```
 
-## Last verification (2026-11-21)
+## Last verification (2026-11-23)
 
-- `cargo build --workspace` — OK.
-- `cargo test --workspace` — 29 `doip-client` + 17 `doip-core` tests + 1 doctest,
+- `cargo build --release` — OK.
+- `cargo test --workspace` — 27 `doip-client` + 17 `doip-core` tests + 1 doctest,
   all passing.
-- `cargo clippy --workspace --all-targets -- -D warnings` — clean.
+- `cargo fmt --all --check` and
+  `cargo clippy --workspace --all-targets -- -D warnings` — clean.
 - Windows target code: `cargo check`/`clippy` for
   `x86_64-pc-windows-msvc` — clean (compile only, not runtime-tested), including
   `newdev!UpdateDriverForPlugAndPlayDevicesW` and `arboard`.
@@ -210,8 +228,13 @@ cargo clippy -p doip-client --all-targets --target x86_64-pc-windows-msvc -- -D 
   clipboard copy on `Enter` (`Code copied to clipboard!`), separate cleanup/exit
   entries, cleanup deletes the log while the app stays alive, graceful Ctrl+C
   shutdown (`Сетевые задачи остановлены, сокеты закрыты`).
-- Actual driver detection/installation/uninstallation and the embedded icon on
-  real Windows 11 are **not yet tested**.
+- Windows 11 (elevated) runtime run of the rebuilt `doip-client.exe`: pressed
+  Enter on "Install Drivers"; log showed devnode creation, INF binding and
+  `Loopback [OK]`. `Get-NetAdapter` listed `Ethernet 3` /
+  `Microsoft KM-TEST Loopback Adapter`, PnP showed `ROOT\NET\0001`, and
+  `setupapi.dev.log` ended the section with `Exit status: SUCCESS`.
+- Npcap uninstall and the embedded icon on real Windows 11 are **not yet tested
+  in this session** (Npcap was already installed and skipped).
 
 ## Environment notes
 
@@ -253,20 +276,22 @@ cargo clippy -p doip-client --all-targets --target x86_64-pc-windows-msvc -- -D 
 Server/relay work is **postponed**. The next milestone is validating the client
 and its driver flow on real Windows 11:
 
-- [ ] `cargo build --workspace` and `cargo test --workspace` on Windows 11.
+- [x] `cargo build --release` and `cargo test --workspace` on Windows 11.
 - [ ] Confirm the built `.exe` shows the custom icon in Explorer and on the
       taskbar (the resource is embedded by `build.rs` on Windows).
 - [ ] Confirm the dashboard renders correctly in Windows Terminal (colours,
       borders, Cyrillic, `✓`).
 - [ ] Run as a normal user without Npcap/Loopback: confirm the red admin status,
       red driver statuses and the admin warning on Install.
-- [ ] Install drivers from the menu as administrator; follow the interactive
-      Npcap wizard and check UAC behaviour and installer exit codes.
-- [ ] Confirm download progress and the `UpdateDriverForPlugAndPlayDevicesW`
-      result/reboot flag appear in the log panel and in `doip-remote.log`.
-- [ ] Confirm Npcap appears at `%SystemRoot%\System32\Npcap\wpcap.dll`.
-- [ ] Confirm the KM-TEST adapter appears and is found by `Get-NetAdapter`.
-- [ ] Confirm the status turns green after installation without a restart.
+- [x] Install drivers from the menu as administrator (Npcap was already
+      installed, so only the Loopback path ran; UAC elevation was approved).
+- [x] Confirm the SetupAPI result and devnode creation appear in the log panel
+      and in `doip-remote.log`.
+- [x] Confirm Npcap appears at `%SystemRoot%\System32\Npcap\wpcap.dll`.
+- [x] Confirm the KM-TEST adapter appears and is found by `Get-NetAdapter`
+      (`ROOT\NET\0001`, `Ethernet 3`).
+- [x] Confirm the status turns green after installation without a restart
+      (`Loopback [OK]`).
 - [ ] Confirm the Car popup copies the code on `Enter` (clipboard contains a
       `DT1-...` string and the log says `Code copied to clipboard!`).
 - [ ] Confirm `v0.1.0` appears in the header's top-right corner.
