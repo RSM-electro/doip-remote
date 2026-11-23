@@ -17,7 +17,7 @@ and record important architecture decisions as they are made.
   Follow-up: the key-hint row is now readable (bold yellow keys, cyan actions),
   and `--mock` no longer fakes the connection: the status stays `Disconnected`
   (`[ОТКЛЮЧЕНО]`) until the relay server exists.
-  UI polish: magenta bold header, strictly red `[НЕТ]`/`[MISSING]` statuses, a
+  UI polish: white bold header, strictly red `[НЕТ]`/`[MISSING]` statuses, a
   `Log File` status row, a bold red `[!]` admin warning marker, and a green
   session-code popup after the Car action.
   Lifecycle: the menu now has separate "Удалить драйверы и логи" and
@@ -55,7 +55,8 @@ and record important architecture decisions as they are made.
   `fix(state): force connection status to Disconnected until server is implemented`
   and the Windows-polish checkpoints, then
   `fix(drivers): resolve Loopback installation failure (0xE000020B) via api` and
-  `fix(drivers): actually remove Loopback adapter and refresh UI status`.
+  `fix(drivers): actually remove Loopback adapter and refresh UI status` and
+  `style(ui): change header color to white`.
 
 ## Architecture
 
@@ -137,7 +138,7 @@ driver flow is validated.
 
 - **Layout:** header (`=== DoIP Remote ===` plus key hints), middle row split
   70/30 into the menu and the dot-aligned status panel, bottom `[ ЛОГИ ]`
-  console. Modals are drawn on top. The header title is **magenta and bold**;
+  console. Modals are drawn on top. The header title is **white and bold**;
   the package version (`v0.1.0`) is shown in the top-right corner.
 - **Key hints:** built from the `HOTKEYS` table in `ui.rs` and rendered as
   `[ключ] - действие • ...`; key caps are bold yellow, separators and action
@@ -234,7 +235,7 @@ cargo clippy -p doip-client --all-targets --target x86_64-pc-windows-msvc -- -D 
   PNG-compressed entries (16/32/48/64/128/256) in `OUT_DIR`; the Windows check
   only warns about the missing `llvm-rc` on Linux, as designed.
 - Linux PTY runs — OK: non-admin dashboard with red statuses and bold red `[!]`,
-  `Log File [EXISTS]`, magenta bold header with `v0.1.0`, green Car-code popup,
+  `Log File [EXISTS]`, white bold header with `v0.1.0`, green Car-code popup,
   clipboard copy on `Enter` (`Code copied to clipboard!`), separate cleanup/exit
   entries, cleanup deletes the log while the app stays alive, graceful Ctrl+C
   shutdown (`Сетевые задачи остановлены, сокеты закрыты`).

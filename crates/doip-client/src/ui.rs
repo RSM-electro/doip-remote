@@ -65,7 +65,7 @@ fn header_title() -> Line<'static> {
     Line::from(Span::styled(
         "=== DoIP Remote ===",
         Style::default()
-            .fg(Color::Magenta)
+            .fg(Color::White)
             .add_modifier(Modifier::BOLD),
     ))
 }
@@ -494,11 +494,11 @@ mod tests {
     }
 
     #[test]
-    fn header_is_magenta_and_bold() {
+    fn header_is_white_and_bold() {
         let title = header_title();
 
         assert_eq!(title.spans[0].content, "=== DoIP Remote ===");
-        assert_eq!(title.spans[0].style.fg, Some(Color::Magenta));
+        assert_eq!(title.spans[0].style.fg, Some(Color::White));
         assert!(title.spans[0].style.add_modifier.contains(Modifier::BOLD));
     }
 
