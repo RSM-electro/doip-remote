@@ -120,6 +120,8 @@ pub struct App {
     /// Remove the log file once the writer is closed (needed on Windows, where
     /// an open file cannot be deleted).
     pub delete_log_on_exit: bool,
+    /// True after a successful cleanup; menu items 1-4 are disabled.
+    pub is_cleaned_up: bool,
     /// Set when the event loop should exit.
     pub should_quit: bool,
 }
@@ -143,6 +145,7 @@ impl App {
             session_code: None,
             log_file_exists: false,
             delete_log_on_exit: false,
+            is_cleaned_up: false,
             should_quit: false,
         }
     }

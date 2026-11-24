@@ -44,23 +44,35 @@ fn main() {
         return;
     }
 
+    let profile = env::var("PROFILE").unwrap_or_default();
+    let embed_manifest = profile == "release";
+
     let manifest = out_dir.join("doip-remote.manifest");
     fs::write(&manifest, windows_manifest()).expect("write Windows manifest");
 
     let resource = out_dir.join("doip-remote.rc");
-    fs::write(
-        &resource,
-        "1 ICON \"doip-remote.ico\"\n1 24 \"doip-remote.manifest\"\n",
-    )
-    .expect("write resource script");
+    let rc = if embed_manifest {
+        "1 ICON \"doip-remote.ico\"\n1 24 \"doip-remote.manifest\"\n".to_owned()
+    } else {
+        "1 ICON \"doip-remote.ico\"\n".to_owned()
+    };
+    fs::write(&resource, rc).expect("write resource script");
 
     let host = env::var("HOST").unwrap_or_default();
     let result = embed_resource::compile(&resource, embed_resource::NONE);
 
     if host.contains("windows") {
-        result.manifest_required().unwrap_or_else(|error| {
-            panic!("failed to compile Windows resources: {error}");
-        });
+        if embed_manifest {
+            result.manifest_required().unwrap_or_else(|error| {
+                panic!("failed to compile Windows resources: {error}");
+            });
+        } else {
+            match result {
+                embed_resource::CompilationResult::Ok
+                | embed_resource::CompilationResult::NotWindows => {}
+                error => panic!("failed to compile Windows resources: {error}"),
+            }
+        }
     } else {
         match result {
             embed_resource::CompilationResult::Ok

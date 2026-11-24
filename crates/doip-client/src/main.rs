@@ -170,7 +170,7 @@ fn handle_key(
 
     if app.show_confirm_delete {
         match key.code {
-            KeyCode::Enter => confirm_cleanup(app, logger),
+            KeyCode::Enter => confirm_cleanup(app, logger, cancellation),
             KeyCode::Esc => {
                 app.show_confirm_delete = false;
                 info!("Cleanup canceled.");
@@ -222,14 +222,19 @@ fn handle_key(
 
     if let KeyCode::Char(character @ '1'..='5') = key.code {
         if !key.modifiers.contains(KeyModifiers::CONTROL) {
-            if app.is_installing {
-                warn!("Wait for driver installation to finish.");
-            } else if let Some(item) = MenuItem::from_hotkey(character) {
-                app.menu_index = MenuItem::ALL
-                    .iter()
-                    .position(|candidate| *candidate == item)
-                    .unwrap_or(app.menu_index);
-                activate(app, install_tx, cancellation);
+            if let Some(item) = MenuItem::from_hotkey(character) {
+                if app.is_cleaned_up && item != MenuItem::Exit {
+                    return;
+                }
+                if app.is_installing {
+                    warn!("Wait for driver installation to finish.");
+                } else {
+                    app.menu_index = MenuItem::ALL
+                        .iter()
+                        .position(|candidate| *candidate == item)
+                        .unwrap_or(app.menu_index);
+                    activate(app, install_tx, cancellation);
+                }
             }
             return;
         }
@@ -257,7 +262,9 @@ fn handle_key(
         }
         KeyCode::Enter => {
             if app.focus == Focus::Menu {
-                if app.is_installing {
+                if app.is_cleaned_up && app.selected() != MenuItem::Exit {
+                    // Menu items 1-4 are disabled after cleanup.
+                } else if app.is_installing {
                     warn!("Wait for driver installation to finish.");
                 } else {
                     activate(app, install_tx, cancellation);
@@ -382,18 +389,26 @@ fn accept_diag_code(input: &str) {
     }
 }
 
-/// Handles the destructive menu entry: removes the drivers and deletes the log
-/// file, then **returns to the event loop** so the refreshed statuses stay on
-/// screen until the user chooses "Finish Diagnostics" or presses Ctrl+C.
+/// Handles the destructive menu entry: disconnects sockets, removes drivers,
+/// deletes the log file, then **returns to the event loop** so the refreshed
+/// statuses stay on screen until the user chooses "5. Exit" or presses Ctrl+C.
 ///
-/// This function never sets `app.should_quit`, never cancels the
-/// `CancellationToken` and never drops the tokio runtime. On Windows the log
-/// file cannot be deleted while `tracing-appender` still has it open, so
-/// [`logging::Logger::delete_log_file`] first swaps the file writer for a sink
-/// and drops the old appender guard; later log calls keep working via the
+/// This function never sets `app.should_quit` and never drops the tokio runtime.
+/// It cancels the network `CancellationToken` to close active sockets. On
+/// Windows the log file cannot be deleted while `tracing-appender` still has it
+/// open, so [`logging::Logger::delete_log_file`] first swaps the file writer for
+/// a sink and drops the old appender guard; later log calls keep working via the
 /// in-memory UI layer and the no-op file writer.
-fn confirm_cleanup(app: &mut App, logger: &mut Option<logging::Logger>) {
+fn confirm_cleanup(
+    app: &mut App,
+    logger: &mut Option<logging::Logger>,
+    cancellation: &CancellationToken,
+) {
     app.show_confirm_delete = false;
+
+    // Disconnect any active sockets before tearing down drivers.
+    cancellation.cancel();
+    app.connection_status = app::ConnectionStatus::Disconnected;
 
     match drivers::remove_all() {
         Ok(()) => info!("[OK] Drivers removed."),
@@ -439,6 +454,11 @@ fn confirm_cleanup(app: &mut App, logger: &mut Option<logging::Logger>) {
         status.loopback_installed,
         logging::log_file_path().is_file(),
     );
+    app.is_cleaned_up = true;
+    app.menu_index = MenuItem::ALL
+        .iter()
+        .position(|item| *item == MenuItem::Exit)
+        .unwrap_or(app.menu_index);
 
     info!("Cleanup complete. The application keeps running.");
 }

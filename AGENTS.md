@@ -26,11 +26,16 @@ and record important architecture decisions as they are made.
   **Stage 1 (2026-11-24):** all UI strings translated to English; numeric
   hotkeys `1-5` select and trigger menu items immediately; menu shows numbered
   labels; top hint bar includes `[1-5] - select`.
-  **Stage 2 (2026-11-24):** Windows build embeds a UAC manifest requiring admin
-  (`requireAdministrator`, `uiAccess="false"`) via `embed-resource` with
-  `.manifest_required()` on Windows hosts; cleanup confirmation modal uses
-  `Enter` to confirm and `Esc` to cancel (no `Y/N`), and `Esc` in modals only
-  closes the modal.
+  **Stage 2 (2026-11-24):** Windows release builds embed a UAC manifest requiring
+  admin (`requireAdministrator`, `uiAccess="false"`) via `embed-resource` with
+  `.manifest_required()` on Windows hosts (debug omits manifest so tests can run
+  without elevation); cleanup confirmation modal uses `Enter` to confirm and
+  `Esc` to cancel (no `Y/N`), and `Esc` in modals only closes the modal.
+  **Stage 3 (2026-11-24):** cleanup cancels the network `CancellationToken`
+  (disconnecting sockets), removes drivers/log, switches logging to a no-op file
+  sink, refreshes Npcap/Loopback/Log File to `[MISSING]` and Connection to
+  `[DISCONNECTED]`, sets `is_cleaned_up`, disables menu items 1-4 (DarkGray,
+  inputs ignored), and leaves only `5. Exit` active.
   Shutdown: `net::NetworkService` owns a cancellation token and a join set; every
   exit path cancels it and waits for tasks to drop their sockets.
   Drivers & extras: Npcap is uninstalled via `NPFInstall.exe -n -u` (with a
@@ -52,20 +57,17 @@ and record important architecture decisions as they are made.
   Icon/manifest: `crates/doip-client/build.rs` converts `icon.png` into a
   multi-size, PNG-compressed `.ico` (16/32/48/64/128/256), writes a Windows
   manifest requiring administrator privileges, and links both through
-  `embed-resource` for Windows targets (`.manifest_required()` on Windows hosts).
+  `embed-resource` for Windows targets; the UAC manifest is embedded in release
+  builds (`.manifest_required()` on Windows hosts) and omitted in debug builds so
+  test binaries can run without elevation.
 - **Next Step:** Finish the remaining items of the Windows 11 checklist below
   (icon rendering, non-admin warning, localized names); the Loopback install and
   cleanup paths are now green. Server/relay work (`doip-server`) remains
   postponed.
-- **Repo state:** branch `main`; stages 1-5 are committed as
-  `wip: stage N completed`, stage 6 as the final dashboard commit, followed by
-  `fix(ui): improve hotkeys readability with yellow/cyan colors`,
-  `fix(state): force connection status to Disconnected until server is implemented`
-  and the Windows-polish checkpoints, then
-  `fix(drivers): resolve Loopback installation failure (0xE000020B) via api`,
-  `fix(drivers): actually remove Loopback adapter and refresh UI status`,
-  `style(ui): change header color to white`, and
-  `fix(lifecycle): prevent app exit after driver cleanup, gracefully handle log deletion`.
+- **Repo state:** branch `main`; recent UX hardening commits include
+  `feat(ui): translate to English and add numeric hotkeys`,
+  `feat(build): require admin privileges and update modal controls`, and this
+  Stage 3 cleanup/menu-locking checkpoint.
 
 ## Architecture
 
@@ -193,14 +195,14 @@ driver flow is validated.
 - **Diag:** opens a popup; typed/pasted code is parsed on `Enter`, and the
   target IP, DoIP port and relay server are logged.
 - **Uninstall drivers and logs:** opens a confirmation popup (`Enter` confirms,
-  `Esc` cancels; `Esc` only closes the modal). Confirmed cleanup runs the Npcap
-  uninstaller (`NPFInstall.exe -n -u`), removes KM-TEST Loopback devnodes
-  (`*MSLOOP`) via `SetupDiRemoveDevice`, swaps the file log writer for a sink,
-  drops the old appender guard and deletes `doip-remote.log`; the app **keeps
-  running**. Cleanup never sets `should_quit`, never cancels the network
-  `CancellationToken` and never stops the tokio runtime. Driver/log statuses are
-  re-probed after cleanup so the panel shows `Npcap [MISSING]` /
-  `Loopback [MISSING]` / `Log File [MISSING]`. Later tracing calls continue
+  `Esc` cancels; `Esc` only closes the modal). Confirmed cleanup cancels the
+  network `CancellationToken` to disconnect active sockets, removes Npcap/Loopback,
+  swaps the file log writer for a sink, drops the old appender guard and deletes
+  `doip-remote.log`; the app **keeps running**. Cleanup never sets `should_quit`
+  and never stops the tokio runtime. After cleanup `is_cleaned_up=true`, menu
+  items 1-4 render DarkGray and their inputs/hotkeys are ignored; only `5. Exit`
+  remains active. Statuses refresh to `Npcap [MISSING]` / `Loopback [MISSING]` /
+  `Log File [MISSING]` / `Connection [DISCONNECTED]`. Later tracing calls continue
   through the in-memory UI layer and a kept-alive no-op file writer.
 - **Finish diagnostics:** exits the application and cancels the network token;
   active tasks stop and their sockets are closed before the process ends.

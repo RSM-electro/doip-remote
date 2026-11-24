@@ -151,6 +151,7 @@ fn draw_menu(frame: &mut Frame, area: Rect, app: &App) {
 fn menu_line(item: MenuItem, selected: bool, app: &App) -> Line<'static> {
     let prefix = if selected { "> " } else { "  " };
     let mut style = Style::default();
+    let disabled = app.is_cleaned_up && item != MenuItem::Exit;
 
     if item.is_dangerous() {
         style = style.fg(Color::Red);
@@ -168,6 +169,10 @@ fn menu_line(item: MenuItem, selected: bool, app: &App) -> Line<'static> {
 
     if app.is_installing && !selected {
         style = style.fg(MUTED);
+    }
+
+    if disabled {
+        style = Style::default().fg(Color::DarkGray);
     }
 
     Line::from(Span::styled(format!("{prefix}{}", item.label()), style))
