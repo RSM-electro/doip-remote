@@ -31,6 +31,55 @@ use tracing::{error, info, warn};
 /// Placeholder relay address until the networking layer is implemented.
 const RELAY_SERVER: &str = "auto";
 
+fn cleanup_trace(message: &str) {
+    use std::io::Write;
+
+    let path = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.join("cleanup-trace.log")))
+        .unwrap_or_else(|| std::path::PathBuf::from("cleanup-trace.log"));
+
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let line = if message.starts_with('[') {
+            message.to_owned()
+        } else {
+            format!("[INFO] {message}")
+        };
+        let _ = writeln!(file, "{line}");
+        let _ = file.flush();
+    }
+}
+
+/// Re-shows and retitles the console window after cleanup helpers ran.
+///
+/// Npcap's uninstaller used to change the shared console title to "NPFInstall"
+/// and hide the window. The process kept running, but the TUI looked closed.
+#[cfg(target_os = "windows")]
+fn restore_console_window() {
+    use windows::core::w;
+    use windows::Win32::System::Console::{GetConsoleWindow, SetConsoleTitleW};
+    use windows::Win32::UI::WindowsAndMessaging::{SetForegroundWindow, ShowWindow, SW_RESTORE};
+
+    // SAFETY: `GetConsoleWindow` either returns null or a valid window handle
+    // owned by this console. Showing it and restoring the title are safe.
+    unsafe {
+        let window = GetConsoleWindow();
+        if !window.0.is_null() {
+            let _ = ShowWindow(window, SW_RESTORE);
+            let _ = SetForegroundWindow(window);
+        }
+        let _ = SetConsoleTitleW(w!("DoIP Remote"));
+    }
+}
+
+/// Non-Windows builds have no shared child console to repair.
+#[cfg(not(target_os = "windows"))]
+fn restore_console_window() {}
+
 fn install_panic_log_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -165,8 +214,10 @@ async fn run(
 ) -> io::Result<()> {
     let keys = tui::spawn_key_reader();
     let (install_tx, mut install_rx) = tokio_mpsc::unbounded_channel();
+    let mut loop_alive_logged = false;
 
     while !app.should_quit {
+        let was_cleaned_up = app.is_cleaned_up;
         terminal.draw(|frame| ui::draw(frame, app))?;
 
         while let Ok(key) = keys.try_recv() {
@@ -177,8 +228,42 @@ async fn run(
             handle_install_event(app, event);
         }
 
+        if !was_cleaned_up && app.is_cleaned_up {
+            info!("[INFO] Cleanup finished...");
+            cleanup_trace("[INFO] Cleanup finished...");
+
+            // A Windows installer may have hidden or retitled the shared
+            // console. Bring the TUI back even though the process never died.
+            restore_console_window();
+            if let Err(error) = tui::reinitialize_after_child_process() {
+                warn!("Failed to restore terminal mode after cleanup: {error}");
+            }
+            if let Err(error) = terminal.clear() {
+                warn!("Failed to redraw the dashboard after cleanup: {error}");
+            }
+            cleanup_trace("[INFO] Console window restored");
+
+            app.show_confirm_exit = false;
+            app.exit_requested = false;
+        }
+
+        // Cleanup must never end the process. After it completes, only an
+        // explicit exit command may set `should_quit`; anything else is stale
+        // state from a queued key/modal and is cleared here.
+        if app.block_stray_quit_after_cleanup() {
+            cleanup_trace("[WARN] Blocked non-explicit quit after cleanup");
+        }
+
+        if app.is_cleaned_up && !loop_alive_logged {
+            info!("[INFO] Loop still alive...");
+            cleanup_trace("[INFO] Loop still alive...");
+            loop_alive_logged = true;
+        }
+
         tokio::time::sleep(Duration::from_millis(16)).await;
     }
+
+    cleanup_trace("[INFO] Event loop exiting after explicit exit request");
 
     // Safety net for early returns and any quit path that forgot to cancel.
     cancellation.cancel();
@@ -200,6 +285,10 @@ fn handle_key(
         if app.show_confirm_exit {
             app.show_confirm_exit = false;
             perform_exit(app, cancellation);
+        } else if app.is_cleaned_up {
+            // Ctrl+C is an explicit exit command and must keep working after
+            // cleanup, even though the menu is locked.
+            perform_exit(app, cancellation);
         } else {
             request_exit(app, cancellation);
         }
@@ -219,6 +308,13 @@ fn handle_key(
     }
 
     if app.show_confirm_exit {
+        if app.is_cleaned_up {
+            // A stale exit modal must never be able to quit the cleaned-up UI.
+            app.show_confirm_exit = false;
+            cleanup_trace("[WARN] Ignored stale exit modal after cleanup");
+            return;
+        }
+
         match key.code {
             KeyCode::Enter => {
                 app.show_confirm_exit = false;
@@ -339,6 +435,13 @@ fn handle_key(
 }
 
 fn request_exit(app: &mut App, cancellation: &CancellationToken) {
+    if app.is_cleaned_up {
+        // Only the explicit Exit entry (or Ctrl+C) may leave the cleaned-up
+        // screen. Esc/q and any stale caller are ignored.
+        cleanup_trace("[WARN] Ignored non-explicit exit request after cleanup");
+        return;
+    }
+
     if app.connection_status == app::ConnectionStatus::Connected {
         app.show_confirm_exit = true;
         return;
@@ -347,7 +450,9 @@ fn request_exit(app: &mut App, cancellation: &CancellationToken) {
 }
 
 fn perform_exit(app: &mut App, cancellation: &CancellationToken) {
+    cleanup_trace("[INFO] Explicit exit requested");
     cancellation.cancel();
+    app.exit_requested = true;
     app.should_quit = true;
 }
 
@@ -367,7 +472,13 @@ fn activate(
             app.show_confirm_delete = true;
         }
         MenuItem::Exit => {
-            request_exit(app, cancellation);
+            if app.is_cleaned_up {
+                // Item 5 remains usable after cleanup; `request_exit` is
+                // reserved for the pre-cleanup confirmation flow.
+                perform_exit(app, cancellation);
+            } else {
+                request_exit(app, cancellation);
+            }
         }
     }
 }
@@ -465,6 +576,8 @@ fn confirm_cleanup(
     cancellation: &CancellationToken,
 ) {
     app.show_confirm_delete = false;
+    cleanup_trace("[INFO] confirm_cleanup() entered");
+    info!("[INFO] Entering cleanup...");
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         cleanup_sequence(app, logger, cancellation);
@@ -487,6 +600,12 @@ fn confirm_cleanup(
         logging::log_file_path().is_file(),
     );
     app.is_cleaned_up = true;
+    // Defensive: cleanup must never request shutdown or leave an exit modal open.
+    app.should_quit = false;
+    app.exit_requested = false;
+    app.show_confirm_exit = false;
+    restore_console_window();
+    cleanup_trace("[INFO] confirm_cleanup() finished; should_quit=false");
 }
 
 fn cleanup_sequence(
@@ -495,11 +614,13 @@ fn cleanup_sequence(
     cancellation: &CancellationToken,
 ) {
     // Step 1: disconnect active sockets.
+    cleanup_trace("[INFO] Step 1: cancel CancellationToken");
     cancellation.cancel();
     app.connection_status = app::ConnectionStatus::Disconnected;
     info!("[OK] Disconnect requested (CancellationToken triggered).");
 
     // Step 2: remove Npcap and Loopback.
+    cleanup_trace("[INFO] Step 2: removing drivers");
     match drivers::remove_all() {
         Ok(()) => info!("[OK] Drivers removed."),
         Err(error) => warn!("Driver removal: {error}"),
@@ -507,6 +628,7 @@ fn cleanup_sequence(
 
     // Step 3: stop file logger, delete log file, switch to dummy/no-op file
     // writer. The UI log layer remains active so this event is still visible.
+    cleanup_trace("[INFO] Step 3: disabling file logger and deleting log");
     let deletion = match logger.as_mut() {
         Some(logger) => logger.delete_log_file(),
         None => std::fs::remove_file(logging::log_file_path()).or_else(|error| {
@@ -530,6 +652,7 @@ fn cleanup_sequence(
     }
 
     // Step 4: force driver/log status refresh for the UI.
+    cleanup_trace("[INFO] Step 4: refreshing statuses");
     let status = drivers::check_all();
     app.apply_cleanup_status(
         status.npcap_installed,

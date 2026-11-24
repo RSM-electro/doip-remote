@@ -126,6 +126,9 @@ pub struct App {
     pub is_cleaned_up: bool,
     /// Set when the event loop should exit.
     pub should_quit: bool,
+    /// Set only by an explicit exit command. After cleanup, a `should_quit`
+    /// without this flag is treated as stray state and cleared.
+    pub exit_requested: bool,
 }
 
 impl App {
@@ -150,6 +153,7 @@ impl App {
             delete_log_on_exit: false,
             is_cleaned_up: false,
             should_quit: false,
+            exit_requested: false,
         }
     }
 
@@ -226,6 +230,25 @@ impl App {
             !self.should_quit,
             "cleanup must never request application shutdown"
         );
+    }
+
+    /// Keeps the event loop alive after cleanup unless the user explicitly
+    /// asked to exit.
+    ///
+    /// Cleanup must not be able to terminate the process through stale state
+    /// (for example a queued `should_quit` or an old exit modal). Only
+    /// [`App::exit_requested`], which is set by an explicit exit command, may
+    /// break the loop once [`App::is_cleaned_up`] is true.
+    ///
+    /// Returns `true` when a stray quit request was blocked.
+    pub fn block_stray_quit_after_cleanup(&mut self) -> bool {
+        if self.is_cleaned_up && self.should_quit && !self.exit_requested {
+            self.should_quit = false;
+            self.show_confirm_exit = false;
+            return true;
+        }
+
+        false
     }
 
     /// Opens the popup that shows a freshly generated Car session code.
@@ -330,6 +353,24 @@ mod tests {
             app.show_confirm_delete,
             "closing the modal is the caller's responsibility"
         );
+    }
+
+    #[test]
+    fn cleanup_fence_blocks_stray_quit_but_allows_explicit_exit() {
+        let mut app = app();
+        app.is_cleaned_up = true;
+        app.should_quit = true;
+        app.show_confirm_exit = true;
+
+        assert!(app.block_stray_quit_after_cleanup());
+        assert!(!app.should_quit);
+        assert!(!app.show_confirm_exit);
+
+        app.exit_requested = true;
+        app.should_quit = true;
+
+        assert!(!app.block_stray_quit_after_cleanup());
+        assert!(app.should_quit);
     }
 
     #[test]

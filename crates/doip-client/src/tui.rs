@@ -46,6 +46,17 @@ pub fn restore() {
     let _ = execute!(stdout(), LeaveAlternateScreen, Show);
 }
 
+/// Re-asserts the TUI console mode after an external child process ran.
+///
+/// Windows installers may reset the shared console mode even when they do not
+/// close it. Re-enabling raw mode and the alternate screen keeps key handling
+/// and rendering working after cleanup.
+pub fn reinitialize_after_child_process() -> io::Result<()> {
+    enable_raw_mode()?;
+    execute!(stdout(), EnterAlternateScreen)?;
+    Ok(())
+}
+
 fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {

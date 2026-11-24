@@ -50,8 +50,21 @@ and record important architecture decisions as they are made.
   moved `menu_index` to `5. Exit`, so a repeated/auto-repeated Enter immediately
   activated Exit. Fix: leave the selection on the disabled cleanup item after
   cleanup; repeated Enter is ignored, only numeric `5` (or explicit navigation to
-  Exit) quits. Verified with elevated release exe: double-Enter after cleanup keeps
-  the app alive; `1` ignored; `5` exits.
+  Exit) quits.
+  **Hidden-console root cause (2026-11-24, the real "app closes" symptom):** the
+  process was often still alive while the window disappeared. The leftover
+  elevated process had a hidden console titled
+  `Administrator: NPFInstall for Npcap 1.80`, proving that `NPFInstall.exe`
+  hijacked the shared console, changed its title and hid it. All driver helper
+  commands now run with `CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP` and null
+  stdio, so they cannot touch the TUI console. After cleanup the app calls
+  `ShowWindow(SW_RESTORE)`, restores the title `DoIP Remote`, re-enables raw mode,
+  re-enters the alternate screen and redraws. Post-cleanup `Esc`/`q` are ignored;
+  only `5. Exit` or `Ctrl+C` leaves. `cleanup-trace.log` (next to the exe) records
+  cleanup steps, console restoration and explicit exit reasons. Scripted release
+  run: `4` + `Enter`, repeated `Enter` and `Esc` keep the process and console
+  visible; `5` + `Enter` exits with code 0; no `panic.log`. The user then manually
+  re-tested the elevated build and confirmed the cleanup screen stays open.
   Shutdown: `net::NetworkService` owns a cancellation token and a join set; every
   exit path cancels it and waits for tasks to drop their sockets.
   Drivers & extras: Npcap is uninstalled via `NPFInstall.exe -n -u` (with a
@@ -83,7 +96,8 @@ and record important architecture decisions as they are made.
 - **Repo state:** branch `main`; recent commits include Stage 1-3 UX hardening,
   `feat(ui): add confirmation modal for active session exit`,
   `fix(lifecycle): definitively resolve cleanup crash and implement strict menu blocking`,
-  and this cleanup-crash root-cause fix with `panic.log` diagnostics.
+  the `panic.log` diagnostics commit, and this strict post-cleanup lifecycle fix
+  (console isolation, quit fence, hidden-window restoration).
 
 ## Architecture
 
@@ -194,6 +208,8 @@ driver flow is validated.
   is reloadable: cleanup disables it while the in-memory mirror keeps working.
   A panic hook writes panic message, location and forced backtrace to
   `panic.log` next to the executable (gitignored via `*.log` and explicit entry).
+  A separate `cleanup-trace.log` survives log deletion and records cleanup steps,
+  console restoration and explicit exit reasons.
 - **Install (Windows):** a background task streams the Npcap 1.80 download with
   percentage progress in the log, runs the installer **without** `/S`, then
   installs the KM-TEST Loopback adapter. That step first ensures a devnode with
@@ -215,19 +231,23 @@ driver flow is validated.
 - **Uninstall drivers and logs:** opens a confirmation popup (`Enter` confirms,
   `Esc` cancels; `Esc` only closes the modal). Confirmed cleanup is panic-safe
   (`catch_unwind`) and never exits/quits. Sequence: (1) cancel `CancellationToken`
-  to disconnect sockets, (2) remove Npcap/Loopback, (3) swap file logger to a
-  no-op sink, drop the old appender guard, delete `doip-remote.log`, log
-  `[INFO] Logging disabled, log file deleted`, (4) force driver/log status refresh,
-  (5) set `is_cleaned_up=true`. Menu items 1-4 render DarkGray and inputs/hotkeys
-  are ignored; only `5. Exit` remains active. Statuses refresh to
-  `Npcap [MISSING]` / `Loopback [MISSING]` / `Log File [MISSING]` /
-  `Connection [DISCONNECTED]`. Later tracing calls continue through the in-memory
-  UI layer and a kept-alive no-op file writer.
+  to disconnect sockets, (2) remove Npcap/Loopback using console-isolated child
+  processes, (3) swap file logger to a no-op sink, drop the old appender guard,
+  delete `doip-remote.log`, log `[INFO] Logging disabled, log file deleted`,
+  (4) force driver/log status refresh, (5) re-show/re-title the console, re-enable
+  raw mode and redraw, (6) set `is_cleaned_up=true`. Menu items 1-4 render
+  DarkGray and inputs/hotkeys are ignored; only `5. Exit` remains active.
+  Post-cleanup `Esc`/`q` are ignored and a stray `should_quit` without
+  `exit_requested` is cleared. Statuses refresh to `Npcap [MISSING]` /
+  `Loopback [MISSING]` / `Log File [MISSING]` / `Connection [DISCONNECTED]`.
+  Later tracing calls continue through the in-memory UI layer and a kept-alive
+  no-op file writer.
 - **Exit:** if `ConnectionStatus::Connected`, shows a confirmation modal
   `[!] Active session. Disconnect and exit? (Enter/Esc)`; `Enter` cancels the
-  network token, shuts down sockets, and exits, `Esc` cancels. If disconnected or
-  cleaned up, exits immediately. All exit paths cancel the network token and wait
-  for socket shutdown before process end.
+  network token, shuts down sockets, and exits, `Esc` cancels. If disconnected,
+  exits immediately. After cleanup only `5. Exit` or `Ctrl+C` exits; `Esc`/`q`
+  are ignored. All exit paths cancel the network token and wait for socket
+  shutdown before process end.
 - **`--mock`:** forces admin rights and both driver statuses green so the
   dashboard can be previewed on Linux. The network status is deliberately not
   faked and stays red `[ОТКЛЮЧЕНО]` until the server exists.

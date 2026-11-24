@@ -21,6 +21,26 @@ use std::{
 
 use tokio::sync::mpsc::UnboundedSender;
 
+/// Child processes must not share the TUI console. Installers such as
+/// `NPFInstall.exe` change the console title and hide the console window while
+/// they run, which makes the still-alive TUI look like it was closed.
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Keep installer Ctrl+C events away from the TUI process group.
+#[cfg(target_os = "windows")]
+const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+
+/// Builds a console-less child command so a helper cannot touch the TUI console.
+#[cfg(target_os = "windows")]
+fn quiet_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    use std::os::windows::process::CommandExt;
+
+    let mut command = Command::new(program);
+    command.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
+    command
+}
+
 /// Installation status of the drivers required for L2 traffic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DriverStatus {
@@ -114,7 +134,13 @@ fn uninstall_npcap() -> Result<(), DriverError> {
         // The original installer uses `-n -u`; plain `-u` can return -1 on
         // Windows 11.
         tracing::info!("Running {} -n -u ...", uninstaller.display());
-        match Command::new(&uninstaller).args(["-n", "-u"]).status() {
+        match quiet_command(&uninstaller)
+            .args(["-n", "-u"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+        {
             Ok(status) if status.success() => {
                 tracing::info!("[OK] Npcap removed.");
                 None
@@ -171,7 +197,7 @@ fn remove_stale_npcap_files() -> Result<(), DriverError> {
 /// outcome is treated as "present" so a query failure never deletes live files.
 #[cfg(target_os = "windows")]
 fn npcap_service_present() -> bool {
-    Command::new("sc.exe")
+    quiet_command("sc.exe")
         .args(["query", "npcap"])
         .output()
         .map_or(true, |output| {
@@ -265,16 +291,10 @@ fn install_all_blocking() -> Result<(), DriverError> {
 #[cfg(target_os = "windows")]
 #[must_use]
 pub fn is_admin() -> bool {
-    use std::os::windows::process::CommandExt;
-
-    /// Do not flash a console window while probing.
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-    Command::new("net")
+    quiet_command("net")
         .args(["session"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW)
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
@@ -319,7 +339,7 @@ fn npcap_installed() -> bool {
 fn loopback_installed() -> bool {
     // Get-NetAdapter exposes both the adapter name and its description, which
     // covers adapters renamed by the user as well as the driver's own name.
-    let powershell = Command::new("powershell.exe")
+    let powershell = quiet_command("powershell.exe")
         .args([
             "-NoProfile",
             "-NonInteractive",
@@ -335,7 +355,7 @@ fn loopback_installed() -> bool {
     }
 
     // netsh is a lighter fallback and also lists adapters on older systems.
-    Command::new("netsh")
+    quiet_command("netsh")
         .args(["interface", "show", "interface"])
         .output()
         .map(|output| output.status.success() && contains_loopback_marker(&output.stdout))
@@ -354,7 +374,11 @@ fn install_npcap() -> Result<(), DriverError> {
     download_npcap(&installer)?;
 
     tracing::info!("Launching Npcap installer. Follow the wizard prompts...");
-    let status = Command::new(&installer).status();
+    let status = quiet_command(&installer)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 
     // The installer is always a temporary file; do not leave it behind.
     let _ = std::fs::remove_file(&installer);
