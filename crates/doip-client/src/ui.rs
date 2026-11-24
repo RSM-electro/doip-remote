@@ -53,6 +53,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
         draw_confirm_delete(frame, area);
     }
 
+    if app.show_confirm_exit {
+        draw_confirm_exit(frame, area);
+    }
+
     if let Some(input) = &app.diag_input {
         draw_diag_input(frame, area, input);
     }
@@ -342,6 +346,38 @@ fn draw_confirm_delete(frame: &mut Frame, area: Rect) {
         Line::from(""),
         Line::from(Span::styled(
             "Enter — confirm, Esc — cancel",
+            Style::default().fg(MUTED),
+        )),
+    ];
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Confirmation ")
+        .border_style(Style::default().fg(Color::Red));
+
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .alignment(Alignment::Center);
+    frame.render_widget(paragraph, popup);
+}
+
+fn draw_confirm_exit(frame: &mut Frame, area: Rect) {
+    let popup = centered_rect(64, 24, area);
+    frame.render_widget(Clear, popup);
+
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(
+                "[!] ",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "Active session. Disconnect and exit? (Enter/Esc)",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Enter — disconnect and exit, Esc — cancel",
             Style::default().fg(MUTED),
         )),
     ];

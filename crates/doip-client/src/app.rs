@@ -99,6 +99,8 @@ pub struct App {
     pub is_installing: bool,
     /// The delete-everything confirmation modal is open.
     pub show_confirm_delete: bool,
+    /// Active-session exit confirmation modal is open.
+    pub show_confirm_exit: bool,
     /// Whether the process has administrator rights.
     pub admin_status: bool,
     /// Whether Npcap is installed.
@@ -135,6 +137,7 @@ impl App {
             focus: Focus::Menu,
             is_installing: false,
             show_confirm_delete: false,
+            show_confirm_exit: false,
             admin_status: false,
             npcap_status: false,
             loopback_status: false,

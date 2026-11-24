@@ -36,6 +36,10 @@ and record important architecture decisions as they are made.
   sink, refreshes Npcap/Loopback/Log File to `[MISSING]` and Connection to
   `[DISCONNECTED]`, sets `is_cleaned_up`, disables menu items 1-4 (DarkGray,
   inputs ignored), and leaves only `5. Exit` active.
+  **Task 1 (2026-11-24):** exiting while `ConnectionStatus::Connected` shows a
+  confirmation modal `[!] Active session. Disconnect and exit? (Enter/Esc)`;
+  `Enter` disconnects and exits, `Esc` cancels. Exiting when disconnected/cleaned
+  up is immediate.
   Shutdown: `net::NetworkService` owns a cancellation token and a join set; every
   exit path cancels it and waits for tasks to drop their sockets.
   Drivers & extras: Npcap is uninstalled via `NPFInstall.exe -n -u` (with a
@@ -204,8 +208,11 @@ driver flow is validated.
   remains active. Statuses refresh to `Npcap [MISSING]` / `Loopback [MISSING]` /
   `Log File [MISSING]` / `Connection [DISCONNECTED]`. Later tracing calls continue
   through the in-memory UI layer and a kept-alive no-op file writer.
-- **Finish diagnostics:** exits the application and cancels the network token;
-  active tasks stop and their sockets are closed before the process ends.
+- **Exit:** if `ConnectionStatus::Connected`, shows a confirmation modal
+  `[!] Active session. Disconnect and exit? (Enter/Esc)`; `Enter` cancels the
+  network token, shuts down sockets, and exits, `Esc` cancels. If disconnected or
+  cleaned up, exits immediately. All exit paths cancel the network token and wait
+  for socket shutdown before process end.
 - **`--mock`:** forces admin rights and both driver statuses green so the
   dashboard can be previewed on Linux. The network status is deliberately not
   faked and stays red `[ОТКЛЮЧЕНО]` until the server exists.

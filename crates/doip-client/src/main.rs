@@ -163,8 +163,12 @@ fn handle_key(
     if key.modifiers.contains(KeyModifiers::CONTROL)
         && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
     {
-        cancellation.cancel();
-        app.should_quit = true;
+        if app.show_confirm_exit {
+            app.show_confirm_exit = false;
+            perform_exit(app, cancellation);
+        } else {
+            request_exit(app, cancellation);
+        }
         return;
     }
 
@@ -174,6 +178,21 @@ fn handle_key(
             KeyCode::Esc => {
                 app.show_confirm_delete = false;
                 info!("Cleanup canceled.");
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    if app.show_confirm_exit {
+        match key.code {
+            KeyCode::Enter => {
+                app.show_confirm_exit = false;
+                perform_exit(app, cancellation);
+            }
+            KeyCode::Esc => {
+                app.show_confirm_exit = false;
+                info!("Exit canceled.");
             }
             _ => {}
         }
@@ -275,16 +294,27 @@ fn handle_key(
             if app.focus == Focus::Logs {
                 app.focus = Focus::Menu;
             } else {
-                cancellation.cancel();
-                app.should_quit = true;
+                request_exit(app, cancellation);
             }
         }
         KeyCode::Char('q') if app.focus == Focus::Menu => {
-            cancellation.cancel();
-            app.should_quit = true;
+            request_exit(app, cancellation);
         }
         _ => {}
     }
+}
+
+fn request_exit(app: &mut App, cancellation: &CancellationToken) {
+    if app.connection_status == app::ConnectionStatus::Connected {
+        app.show_confirm_exit = true;
+        return;
+    }
+    perform_exit(app, cancellation);
+}
+
+fn perform_exit(app: &mut App, cancellation: &CancellationToken) {
+    cancellation.cancel();
+    app.should_quit = true;
 }
 
 fn activate(
@@ -303,8 +333,7 @@ fn activate(
             app.show_confirm_delete = true;
         }
         MenuItem::Exit => {
-            cancellation.cancel();
-            app.should_quit = true;
+            request_exit(app, cancellation);
         }
     }
 }
