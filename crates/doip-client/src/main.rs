@@ -170,8 +170,8 @@ fn handle_key(
 
     if app.show_confirm_delete {
         match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') => confirm_cleanup(app, logger),
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            KeyCode::Enter => confirm_cleanup(app, logger),
+            KeyCode::Esc => {
                 app.show_confirm_delete = false;
                 info!("Cleanup canceled.");
             }

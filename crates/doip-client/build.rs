@@ -1,14 +1,15 @@
-//! Embeds `icon.png` into the Windows executable.
+//! Embeds `icon.png` and a UAC manifest into the Windows executable.
 //!
 //! The source image is a large PNG (1254×1254), while the Windows resource
 //! format wants an `.ico`. This script resizes the image to the standard icon
-//! sizes, writes a PNG-compressed multi-size ICO into `OUT_DIR` and lets
-//! `embed-resource` compile a tiny `.rc` file and link the result.
+//! sizes, writes a PNG-compressed multi-size ICO into `OUT_DIR`, writes a
+//! manifest that requires administrator privileges, and lets `embed-resource`
+//! compile a tiny `.rc` file and link the result.
 //!
 //! On non-Windows targets the script does nothing. When cross-compiling for
 //! Windows from Linux without an `rc`/`windres` tool, `embed-resource` reports
 //! that it could not attempt compilation (`NotAttempted`): the build still
-//! succeeds and the icon is embedded automatically on a real Windows host.
+//! succeeds and the resources are embedded automatically on a real Windows host.
 
 use std::{
     env, fs,
@@ -43,22 +44,33 @@ fn main() {
         return;
     }
 
+    let manifest = out_dir.join("doip-remote.manifest");
+    fs::write(&manifest, windows_manifest()).expect("write Windows manifest");
+
     let resource = out_dir.join("doip-remote.rc");
-    fs::write(&resource, "1 ICON \"doip-remote.ico\"\n").expect("write resource script");
+    fs::write(
+        &resource,
+        "1 ICON \"doip-remote.ico\"\n1 24 \"doip-remote.manifest\"\n",
+    )
+    .expect("write resource script");
 
     let host = env::var("HOST").unwrap_or_default();
     let result = embed_resource::compile(&resource, embed_resource::NONE);
 
-    match result {
-        embed_resource::CompilationResult::Ok => {}
-        failure if host.contains("windows") => {
-            panic!("failed to compile Windows resources: {failure}");
-        }
-        not_attempted => {
-            println!(
-                "cargo:warning={not_attempted}; the icon will be embedded when the \
-                 executable is built on Windows"
-            );
+    if host.contains("windows") {
+        result.manifest_required().unwrap_or_else(|error| {
+            panic!("failed to compile Windows resources: {error}");
+        });
+    } else {
+        match result {
+            embed_resource::CompilationResult::Ok
+            | embed_resource::CompilationResult::NotWindows => {}
+            not_attempted => {
+                println!(
+                    "cargo:warning={not_attempted}; the icon and manifest will be embedded when the \
+                     executable is built on Windows"
+                );
+            }
         }
     }
 }
@@ -85,6 +97,21 @@ fn png_to_ico(source: &Path, destination: &Path) -> Result<(), Box<dyn std::erro
 
     write_ico(destination, &images)?;
     Ok(())
+}
+
+/// Windows application manifest requiring administrator privileges (UAC).
+fn windows_manifest() -> &'static str {
+    r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="requireAdministrator" uiAccess="false" />
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+</assembly>
+"#
 }
 
 /// Writes an ICO container with one PNG-compressed entry per image.

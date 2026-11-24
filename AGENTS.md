@@ -26,6 +26,11 @@ and record important architecture decisions as they are made.
   **Stage 1 (2026-11-24):** all UI strings translated to English; numeric
   hotkeys `1-5` select and trigger menu items immediately; menu shows numbered
   labels; top hint bar includes `[1-5] - select`.
+  **Stage 2 (2026-11-24):** Windows build embeds a UAC manifest requiring admin
+  (`requireAdministrator`, `uiAccess="false"`) via `embed-resource` with
+  `.manifest_required()` on Windows hosts; cleanup confirmation modal uses
+  `Enter` to confirm and `Esc` to cancel (no `Y/N`), and `Esc` in modals only
+  closes the modal.
   Shutdown: `net::NetworkService` owns a cancellation token and a join set; every
   exit path cancels it and waits for tasks to drop their sockets.
   Drivers & extras: Npcap is uninstalled via `NPFInstall.exe -n -u` (with a
@@ -44,9 +49,10 @@ and record important architecture decisions as they are made.
   Windows 11: `ROOT\NET\0001` = Microsoft KM-TEST Loopback Adapter, visible in
   `Get-NetAdapter`, UI status `Loopback [OK]`, setupapi section ends with
   `Exit status: SUCCESS`.
-  Icon: `crates/doip-client/build.rs` converts `icon.png` into a multi-size,
-  PNG-compressed `.ico` (16/32/48/64/128/256) and links it through
-  `embed-resource` for Windows targets, so Explorer and the taskbar show it.
+  Icon/manifest: `crates/doip-client/build.rs` converts `icon.png` into a
+  multi-size, PNG-compressed `.ico` (16/32/48/64/128/256), writes a Windows
+  manifest requiring administrator privileges, and links both through
+  `embed-resource` for Windows targets (`.manifest_required()` on Windows hosts).
 - **Next Step:** Finish the remaining items of the Windows 11 checklist below
   (icon rendering, non-admin warning, localized names); the Loopback install and
   cleanup paths are now green. Server/relay work (`doip-server`) remains
@@ -186,8 +192,8 @@ driver flow is validated.
   clipboard and logs `[INFO] Code copied to clipboard!`; `Esc` closes the popup.
 - **Diag:** opens a popup; typed/pasted code is parsed on `Enter`, and the
   target IP, DoIP port and relay server are logged.
-- **Uninstall drivers and logs:** opens a confirmation popup (currently `Y/N`,
-  will become `Enter/Esc` in Stage 2). Confirmed cleanup runs the Npcap
+- **Uninstall drivers and logs:** opens a confirmation popup (`Enter` confirms,
+  `Esc` cancels; `Esc` only closes the modal). Confirmed cleanup runs the Npcap
   uninstaller (`NPFInstall.exe -n -u`), removes KM-TEST Loopback devnodes
   (`*MSLOOP`) via `SetupDiRemoveDevice`, swaps the file log writer for a sink,
   drops the old appender guard and deletes `doip-remote.log`; the app **keeps
