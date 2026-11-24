@@ -422,12 +422,9 @@ fn accept_diag_code(input: &str) {
 /// deletes the log file, then **returns to the event loop** so the refreshed
 /// statuses stay on screen until the user chooses "5. Exit" or presses Ctrl+C.
 ///
-/// This function never sets `app.should_quit` and never drops the tokio runtime.
-/// It cancels the network `CancellationToken` to close active sockets. On
-/// Windows the log file cannot be deleted while `tracing-appender` still has it
-/// open, so [`logging::Logger::delete_log_file`] first swaps the file writer for
-/// a sink and drops the old appender guard; later log calls keep working via the
-/// in-memory UI layer and the no-op file writer.
+/// This function never sets `app.should_quit`, never exits the process, and never
+/// drops the tokio runtime. It is panic-safe: any unexpected panic is caught and
+/// converted into a UI log entry while keeping the app alive in cleaned-up mode.
 fn confirm_cleanup(
     app: &mut App,
     logger: &mut Option<logging::Logger>,
@@ -435,24 +432,47 @@ fn confirm_cleanup(
 ) {
     app.show_confirm_delete = false;
 
-    // Disconnect any active sockets before tearing down drivers.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        cleanup_sequence(app, logger, cancellation);
+    }));
+
+    if let Err(payload) = result {
+        let message = panic_message(&payload);
+        error!("Cleanup panicked: {message}");
+    }
+
+    // Always force the cleaned-up UI state, even if a step panicked.
+    let status = drivers::check_all();
+    app.apply_cleanup_status(
+        status.npcap_installed,
+        status.loopback_installed,
+        logging::log_file_path().is_file(),
+    );
+    app.is_cleaned_up = true;
+    app.menu_index = MenuItem::ALL
+        .iter()
+        .position(|item| *item == MenuItem::Exit)
+        .unwrap_or(app.menu_index);
+}
+
+fn cleanup_sequence(
+    app: &mut App,
+    logger: &mut Option<logging::Logger>,
+    cancellation: &CancellationToken,
+) {
+    // Step 1: disconnect active sockets.
     cancellation.cancel();
     app.connection_status = app::ConnectionStatus::Disconnected;
+    info!("[OK] Disconnect requested (CancellationToken triggered).");
 
+    // Step 2: remove Npcap and Loopback.
     match drivers::remove_all() {
         Ok(()) => info!("[OK] Drivers removed."),
         Err(error) => warn!("Driver removal: {error}"),
     }
 
-    // Re-probe while the file writer is still alive: these statuses are logged
-    // to `doip-remote.log` before it is removed.
-    let status = drivers::check_all();
-    info!(
-        "Npcap — {}, Loopback — {}",
-        ready_tag(status.npcap_installed),
-        ready_tag(status.loopback_installed)
-    );
-
+    // Step 3: stop file logger, delete log file, switch to dummy/no-op file
+    // writer. The UI log layer remains active so this event is still visible.
     let deletion = match logger.as_mut() {
         Some(logger) => logger.delete_log_file(),
         None => std::fs::remove_file(logging::log_file_path()).or_else(|error| {
@@ -475,21 +495,25 @@ fn confirm_cleanup(
         }
     }
 
-    // Final refresh after all cleanup steps. The log-file flag is read from
-    // disk so the panel reports `[MISSING]` only when the file is really gone.
+    // Step 4: force driver/log status refresh for the UI.
     let status = drivers::check_all();
     app.apply_cleanup_status(
         status.npcap_installed,
         status.loopback_installed,
         logging::log_file_path().is_file(),
     );
-    app.is_cleaned_up = true;
-    app.menu_index = MenuItem::ALL
-        .iter()
-        .position(|item| *item == MenuItem::Exit)
-        .unwrap_or(app.menu_index);
 
     info!("Cleanup complete. The application keeps running.");
+}
+
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_owned()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "unknown panic".to_owned()
+    }
 }
 
 fn ready_tag(ready: bool) -> &'static str {

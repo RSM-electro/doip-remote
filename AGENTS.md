@@ -40,6 +40,10 @@ and record important architecture decisions as they are made.
   confirmation modal `[!] Active session. Disconnect and exit? (Enter/Esc)`;
   `Enter` disconnects and exits, `Esc` cancels. Exiting when disconnected/cleaned
   up is immediate.
+  **Task 2 (2026-11-24):** cleanup is panic-safe (`catch_unwind`) and never exits;
+  sequence: cancel `CancellationToken`, remove Npcap/Loopback, swap file logger to
+  sink/drop guard/delete log, force driver/log status refresh, set `is_cleaned_up`
+  and lock menu 1-4 (DarkGray, inputs ignored), only `5. Exit` active.
   Shutdown: `net::NetworkService` owns a cancellation token and a join set; every
   exit path cancels it and waits for tasks to drop their sockets.
   Drivers & extras: Npcap is uninstalled via `NPFInstall.exe -n -u` (with a
@@ -68,10 +72,9 @@ and record important architecture decisions as they are made.
   (icon rendering, non-admin warning, localized names); the Loopback install and
   cleanup paths are now green. Server/relay work (`doip-server`) remains
   postponed.
-- **Repo state:** branch `main`; recent UX hardening commits include
-  `feat(ui): translate to English and add numeric hotkeys`,
-  `feat(build): require admin privileges and update modal controls`, and this
-  Stage 3 cleanup/menu-locking checkpoint.
+- **Repo state:** branch `main`; recent commits include Stage 1-3 UX hardening,
+  `feat(ui): add confirmation modal for active session exit`, and
+  `fix(lifecycle): definitively resolve cleanup crash and implement strict menu blocking`.
 
 ## Architecture
 
@@ -199,15 +202,16 @@ driver flow is validated.
 - **Diag:** opens a popup; typed/pasted code is parsed on `Enter`, and the
   target IP, DoIP port and relay server are logged.
 - **Uninstall drivers and logs:** opens a confirmation popup (`Enter` confirms,
-  `Esc` cancels; `Esc` only closes the modal). Confirmed cleanup cancels the
-  network `CancellationToken` to disconnect active sockets, removes Npcap/Loopback,
-  swaps the file log writer for a sink, drops the old appender guard and deletes
-  `doip-remote.log`; the app **keeps running**. Cleanup never sets `should_quit`
-  and never stops the tokio runtime. After cleanup `is_cleaned_up=true`, menu
-  items 1-4 render DarkGray and their inputs/hotkeys are ignored; only `5. Exit`
-  remains active. Statuses refresh to `Npcap [MISSING]` / `Loopback [MISSING]` /
-  `Log File [MISSING]` / `Connection [DISCONNECTED]`. Later tracing calls continue
-  through the in-memory UI layer and a kept-alive no-op file writer.
+  `Esc` cancels; `Esc` only closes the modal). Confirmed cleanup is panic-safe
+  (`catch_unwind`) and never exits/quits. Sequence: (1) cancel `CancellationToken`
+  to disconnect sockets, (2) remove Npcap/Loopback, (3) swap file logger to a
+  no-op sink, drop the old appender guard, delete `doip-remote.log`, log
+  `[INFO] Logging disabled, log file deleted`, (4) force driver/log status refresh,
+  (5) set `is_cleaned_up=true`. Menu items 1-4 render DarkGray and inputs/hotkeys
+  are ignored; only `5. Exit` remains active. Statuses refresh to
+  `Npcap [MISSING]` / `Loopback [MISSING]` / `Log File [MISSING]` /
+  `Connection [DISCONNECTED]`. Later tracing calls continue through the in-memory
+  UI layer and a kept-alive no-op file writer.
 - **Exit:** if `ConnectionStatus::Connected`, shows a confirmation modal
   `[!] Active session. Disconnect and exit? (Enter/Esc)`; `Enter` cancels the
   network token, shuts down sockets, and exits, `Esc` cancels. If disconnected or
