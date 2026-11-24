@@ -41,7 +41,7 @@ async fn main() -> ExitCode {
     let mut app = App::new(logs);
     let drivers_ok = if mock {
         app.enable_mock();
-        info!("[OK] Mock-режим: права администратора и драйверы эмулируются, сеть — нет.");
+        info!("[OK] Mock mode: administrator rights and drivers emulated, network is not.");
         true
     } else {
         app.admin_status = drivers::is_admin();
@@ -56,7 +56,7 @@ async fn main() -> ExitCode {
     let mut terminal = match tui::init() {
         Ok(terminal) => terminal,
         Err(error) => {
-            eprintln!("Не удалось инициализировать терминал: {error}");
+            eprintln!("Failed to initialize terminal: {error}");
             return ExitCode::FAILURE;
         }
     };
@@ -79,18 +79,18 @@ async fn main() -> ExitCode {
         let path = logging::log_file_path();
         if let Err(error) = std::fs::remove_file(&path) {
             if error.kind() != std::io::ErrorKind::NotFound {
-                eprintln!("Не удалось удалить лог {}: {error}", path.display());
+                eprintln!("Failed to delete log {}: {error}", path.display());
             }
         }
     }
 
     match result {
         Ok(()) => {
-            println!("{}", "До встречи!".bright_black());
+            println!("{}", "Goodbye!".bright_black());
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("Ошибка TUI: {error}");
+            eprintln!("TUI error: {error}");
             ExitCode::FAILURE
         }
     }
@@ -98,29 +98,29 @@ async fn main() -> ExitCode {
 
 fn log_startup_status(app: &App, drivers_ok: bool) {
     info!(
-        "Логирование запущено, файл: {}",
+        "Logging started, file: {}",
         logging::log_file_path().display()
     );
 
     if app.admin_status {
-        info!("[OK] Права администратора есть.");
+        info!("[OK] Administrator rights available.");
     } else {
-        warn!("[!] Нет прав администратора: установка драйверов недоступна.");
+        warn!("[!] No administrator rights: driver installation is unavailable.");
     }
 
     info!(
-        "Проверка драйверов: Npcap — {}, Loopback — {}",
+        "Driver check: Npcap — {}, Loopback — {}",
         ready_tag(app.npcap_status),
         ready_tag(app.loopback_status)
     );
 
     if drivers_ok {
-        info!("[OK] Все драйверы установлены.");
+        info!("[OK] All drivers are installed.");
     } else {
-        warn!("Не все драйверы установлены: установите их из меню.");
+        warn!("Not all drivers are installed: install them from the menu.");
     }
 
-    info!("Tab — переключить фокус на логи, PageUp/PageDown — прокрутка.");
+    info!("Tab — switch focus to logs, PageUp/PageDown — scroll.");
 }
 
 async fn run(
@@ -173,7 +173,7 @@ fn handle_key(
             KeyCode::Char('y') | KeyCode::Char('Y') => confirm_cleanup(app, logger),
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                 app.show_confirm_delete = false;
-                info!("Удаление отменено.");
+                info!("Cleanup canceled.");
             }
             _ => {}
         }
@@ -198,7 +198,7 @@ fn handle_key(
         match key.code {
             KeyCode::Esc => {
                 app.diag_input = None;
-                info!("Ввод кода отменён.");
+                info!("Code entry canceled.");
             }
             KeyCode::Enter => {
                 if let Some(code) = app.diag_input.take() {
@@ -218,6 +218,21 @@ fn handle_key(
             _ => {}
         }
         return;
+    }
+
+    if let KeyCode::Char(character @ '1'..='5') = key.code {
+        if !key.modifiers.contains(KeyModifiers::CONTROL) {
+            if app.is_installing {
+                warn!("Wait for driver installation to finish.");
+            } else if let Some(item) = MenuItem::from_hotkey(character) {
+                app.menu_index = MenuItem::ALL
+                    .iter()
+                    .position(|candidate| *candidate == item)
+                    .unwrap_or(app.menu_index);
+                activate(app, install_tx, cancellation);
+            }
+            return;
+        }
     }
 
     match key.code {
@@ -243,7 +258,7 @@ fn handle_key(
         KeyCode::Enter => {
             if app.focus == Focus::Menu {
                 if app.is_installing {
-                    warn!("Дождитесь завершения установки драйверов.");
+                    warn!("Wait for driver installation to finish.");
                 } else {
                     activate(app, install_tx, cancellation);
                 }
@@ -275,7 +290,7 @@ fn activate(
         MenuItem::Car => begin_car(app),
         MenuItem::Diag => {
             app.diag_input = Some(String::new());
-            info!("Введите код подключения DT1-...");
+            info!("Enter the DT1-... session code:");
         }
         MenuItem::Cleanup => {
             app.show_confirm_delete = true;
@@ -289,24 +304,22 @@ fn activate(
 
 fn begin_install(app: &mut App, install_tx: &tokio_mpsc::UnboundedSender<InstallEvent>) {
     if app.is_installing {
-        info!("Установка уже выполняется, дождитесь завершения.");
+        info!("Installation is already running, please wait.");
         return;
     }
 
     if !app.admin_status {
-        warn!(
-            "[!] Требуются права Администратора. Перезапустите программу от имени Администратора."
-        );
+        warn!("[!] Administrator rights are required. Restart the program as Administrator.");
         return;
     }
 
     if app.drivers_ready() {
-        info!("[OK] Все драйверы уже установлены.");
+        info!("[OK] All drivers are already installed.");
         return;
     }
 
     app.is_installing = true;
-    info!("Скачивание и установка драйверов...");
+    info!("Downloading and installing drivers...");
 
     drivers::install_all_async(install_tx.clone());
 }
@@ -320,8 +333,8 @@ fn handle_install_event(app: &mut App, event: InstallEvent) {
             app.set_driver_status(status.npcap_installed, status.loopback_installed);
 
             match result {
-                Ok(()) => info!("[OK] Установка завершена. Проверьте статус."),
-                Err(error) => error!("Установка не удалась: {error}"),
+                Ok(()) => info!("[OK] Installation complete. Check the status panel."),
+                Err(error) => error!("Installation failed: {error}"),
             }
 
             info!(
@@ -337,9 +350,9 @@ fn begin_car(app: &mut App) {
     let session = SessionCode::new(Role::Car, RELAY_SERVER, None);
     let code = session.generate();
 
-    info!("Сессия Car создана. Передайте код диагносту:");
+    info!("Car session created. Share this code with the diagnostician:");
     info!("{code}");
-    info!("Ожидание подключения к серверу (заглушка)...");
+    info!("Waiting for server connection (stub)...");
 
     app.set_session_code(code);
 }
@@ -351,21 +364,21 @@ fn copy_session_code(code: &str) {
 
     match copied {
         Ok(()) => info!("Code copied to clipboard!"),
-        Err(error) => warn!("Не удалось скопировать код в буфер обмена: {error}"),
+        Err(error) => warn!("Failed to copy code to clipboard: {error}"),
     }
 }
 
 fn accept_diag_code(input: &str) {
     match SessionCode::parse(input) {
         Ok(session) => {
-            info!("[OK] Код принят. Сервер: {}", session.server);
+            info!("[OK] Code accepted. Server: {}", session.server);
             info!(
-                "Целевой IP авто: {:?}, порт DoIP: {}",
+                "Target vehicle IP: {:?}, DoIP port: {}",
                 session.vehicle_ip, session.doip_port
             );
-            info!("Ожидание подключения...");
+            info!("Waiting for connection...");
         }
-        Err(error) => error!("Не удалось разобрать код: {error}"),
+        Err(error) => error!("Failed to parse code: {error}"),
     }
 }
 
@@ -383,8 +396,8 @@ fn confirm_cleanup(app: &mut App, logger: &mut Option<logging::Logger>) {
     app.show_confirm_delete = false;
 
     match drivers::remove_all() {
-        Ok(()) => info!("[OK] Драйверы удалены."),
-        Err(error) => warn!("Удаление драйверов: {error}"),
+        Ok(()) => info!("[OK] Drivers removed."),
+        Err(error) => warn!("Driver removal: {error}"),
     }
 
     // Re-probe while the file writer is still alive: these statuses are logged
@@ -413,7 +426,7 @@ fn confirm_cleanup(app: &mut App, logger: &mut Option<logging::Logger>) {
             info!("Logging disabled, log file deleted");
         }
         Err(error) => {
-            warn!("Не удалось удалить лог: {error}. Повторим при выходе.");
+            warn!("Failed to delete log: {error}. Will retry on exit.");
             app.delete_log_on_exit = true;
         }
     }
@@ -427,13 +440,13 @@ fn confirm_cleanup(app: &mut App, logger: &mut Option<logging::Logger>) {
         logging::log_file_path().is_file(),
     );
 
-    info!("Очистка завершена. Приложение продолжает работу.");
+    info!("Cleanup complete. The application keeps running.");
 }
 
 fn ready_tag(ready: bool) -> &'static str {
     if ready {
         "[OK]"
     } else {
-        "[НЕТ]"
+        "[MISSING]"
     }
 }

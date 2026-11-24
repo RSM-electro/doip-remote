@@ -56,15 +56,28 @@ impl MenuItem {
         Self::Exit,
     ];
 
-    /// Human-readable menu label.
+    /// Human-readable menu label, including its numeric hotkey.
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
-            Self::Install => "Установить драйверы",
-            Self::Car => "Я рядом с машиной (Car)",
-            Self::Diag => "Я диагност (Diag)",
-            Self::Cleanup => "Удалить драйверы и логи",
-            Self::Exit => "Завершить диагностику",
+            Self::Install => "1. Install Drivers",
+            Self::Car => "2. I am near the car (Car)",
+            Self::Diag => "3. I am a diagnostician (Diag)",
+            Self::Cleanup => "4. Uninstall drivers and logs",
+            Self::Exit => "5. Exit",
+        }
+    }
+
+    /// Returns the menu item bound to a numeric hotkey, if any.
+    #[must_use]
+    pub fn from_hotkey(key: char) -> Option<Self> {
+        match key {
+            '1' => Some(Self::Install),
+            '2' => Some(Self::Car),
+            '3' => Some(Self::Diag),
+            '4' => Some(Self::Cleanup),
+            '5' => Some(Self::Exit),
+            _ => None,
         }
     }
 
@@ -339,10 +352,21 @@ mod tests {
 
     #[test]
     fn cleanup_and_exit_are_separate_entries() {
-        assert_eq!(MenuItem::Cleanup.label(), "Удалить драйверы и логи");
-        assert_eq!(MenuItem::Exit.label(), "Завершить диагностику");
+        assert_eq!(MenuItem::Cleanup.label(), "4. Uninstall drivers and logs");
+        assert_eq!(MenuItem::Exit.label(), "5. Exit");
         assert!(MenuItem::Cleanup.is_dangerous());
         assert!(!MenuItem::Exit.is_dangerous());
+    }
+
+    #[test]
+    fn numeric_hotkeys_map_to_menu_items() {
+        assert_eq!(MenuItem::from_hotkey('1'), Some(MenuItem::Install));
+        assert_eq!(MenuItem::from_hotkey('2'), Some(MenuItem::Car));
+        assert_eq!(MenuItem::from_hotkey('3'), Some(MenuItem::Diag));
+        assert_eq!(MenuItem::from_hotkey('4'), Some(MenuItem::Cleanup));
+        assert_eq!(MenuItem::from_hotkey('5'), Some(MenuItem::Exit));
+        assert_eq!(MenuItem::from_hotkey('0'), None);
+        assert_eq!(MenuItem::from_hotkey('6'), None);
     }
 
     #[test]

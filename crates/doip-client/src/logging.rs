@@ -3,7 +3,7 @@
 //! Every event is written to two sinks:
 //!
 //! * `doip-remote.log` next to the executable (for later inspection);
-//! * an in-memory ring buffer that the TUI renders in the `[ ЛОГИ ]` panel.
+//! * an in-memory ring buffer that the TUI renders in the `[ LOGS ]` panel.
 //!
 //! The in-memory mirror is implemented as a custom [`Layer`], so any
 //! `tracing` event emitted anywhere in the client shows up in the dashboard
@@ -126,7 +126,7 @@ pub fn init(logs: Arc<Mutex<VecDeque<String>>>) -> Option<Logger> {
         .append(true)
         .open(&path)
     {
-        eprintln!("Не удалось создать лог {}: {error}", path.display());
+        eprintln!("Failed to create log {}: {error}", path.display());
     }
 
     let appender = rolling::never(directory, LOG_FILE_NAME);

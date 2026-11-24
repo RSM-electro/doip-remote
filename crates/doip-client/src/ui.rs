@@ -17,12 +17,13 @@ const ACCENT: Color = Color::Cyan;
 const MUTED: Color = Color::DarkGray;
 
 /// Keys shown in the header together with the action they perform.
-const HOTKEYS: [(&str, &str); 5] = [
-    ("↑/↓", "меню"),
-    ("Enter", "выбор"),
-    ("Tab", "логи"),
-    ("PgUp/PgDn", "прокрутка"),
-    ("Ctrl+C", "выход"),
+const HOTKEYS: [(&str, &str); 6] = [
+    ("1-5", "select"),
+    ("↑/↓", "menu"),
+    ("Enter", "confirm"),
+    ("Tab", "logs"),
+    ("PgUp/PgDn", "scroll"),
+    ("Ctrl+C", "quit"),
 ];
 
 /// Draws the whole dashboard.
@@ -126,11 +127,11 @@ fn draw_menu(frame: &mut Frame, area: Rect, app: &App) {
 
     let title = if app.is_installing {
         Line::from(Span::styled(
-            " Меню — установка идёт... ",
+            " Menu — installation in progress... ",
             Style::default().fg(Color::Yellow),
         ))
     } else {
-        Line::from(" Меню ")
+        Line::from(" Menu ")
     };
 
     let lines = MenuItem::ALL
@@ -173,10 +174,10 @@ fn menu_line(item: MenuItem, selected: bool, app: &App) -> Line<'static> {
 }
 
 fn draw_statuses(frame: &mut Frame, area: Rect, app: &App) {
-    let block = Block::default().borders(Borders::ALL).title(" Статусы ");
+    let block = Block::default().borders(Borders::ALL).title(" Statuses ");
     let width = block.inner(area).width as usize;
 
-    let admin = ok_line("Права Админа", app.admin_status, width);
+    let admin = ok_line("Admin Rights", app.admin_status, width);
     let npcap = ok_line("Npcap", app.npcap_status, width);
     let loopback = ok_line("Loopback", app.loopback_status, width);
     let log_file = presence_line(
@@ -189,16 +190,16 @@ fn draw_statuses(frame: &mut Frame, area: Rect, app: &App) {
 
     let connection = match app.connection_status {
         ConnectionStatus::Connected => status_line(
-            "Соединение",
-            "[ЕСТЬ КОНТАКТ ✓]",
+            "Connection",
+            "[CONNECTED ✓]",
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
             width,
         ),
         ConnectionStatus::Disconnected => status_line(
-            "Соединение",
-            "[ОТКЛЮЧЕНО]",
+            "Connection",
+            "[DISCONNECTED]",
             Style::default().fg(Color::Red),
             width,
         ),
@@ -208,10 +209,10 @@ fn draw_statuses(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-/// Builds an `[OK]` / `[НЕТ]` row. Anything that is not present is **red**:
+/// Builds an `[OK]` / `[MISSING]` row. Anything that is not present is **red**:
 /// a missing driver (or missing admin rights) must never look healthy.
 fn ok_line(label: &str, present: bool, width: usize) -> Line<'static> {
-    presence_line(label, present, "[OK]", "[НЕТ]", width)
+    presence_line(label, present, "[OK]", "[MISSING]", width)
 }
 
 fn presence_line(
@@ -233,7 +234,7 @@ fn presence_line(
     }
 }
 
-/// Builds a status row aligned with dots: `Название........ [OK]`.
+/// Builds a status row aligned with dots: `Name........ [OK]`.
 fn status_line(label: &str, value: &str, value_style: Style, width: usize) -> Line<'static> {
     let label_width = label.chars().count();
     let value_width = value.chars().count();
@@ -256,7 +257,7 @@ fn draw_logs(frame: &mut Frame, area: Rect, app: &App) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .title("[ ЛОГИ ]")
+        .title("[ LOGS ]")
         .border_style(border);
     let height = block.inner(area).height as usize;
 
@@ -330,18 +331,18 @@ fn draw_confirm_delete(frame: &mut Frame, area: Rect) {
 
     let lines = vec![
         Line::from(Span::styled(
-            "Удалить драйверы и логи? (Y/N)",
+            "Uninstall drivers and delete logs? (Enter/Esc)",
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
         Line::from(Span::styled(
-            "Y — удалить, N — отмена",
+            "Enter — confirm, Esc — cancel",
             Style::default().fg(MUTED),
         )),
     ];
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Подтверждение ")
+        .title(" Confirmation ")
         .border_style(Style::default().fg(Color::Red));
 
     let paragraph = Paragraph::new(lines)
@@ -364,7 +365,7 @@ fn draw_session_code(frame: &mut Frame, area: Rect, code: &str) {
 
     let lines = vec![
         Line::from(Span::styled(
-            "Код подключения Car:",
+            "Car session code:",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -373,13 +374,13 @@ fn draw_session_code(frame: &mut Frame, area: Rect, code: &str) {
         code_line(code),
         Line::from(""),
         Line::from(Span::styled(
-            "Enter — копировать, Esc — закрыть",
+            "Enter — copy, Esc — close",
             Style::default().fg(MUTED),
         )),
     ];
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Сессия Car ")
+        .title(" Car Session ")
         .border_style(Style::default().fg(Color::Green));
 
     let paragraph = Paragraph::new(lines)
@@ -395,19 +396,19 @@ fn draw_diag_input(frame: &mut Frame, area: Rect, input: &str) {
 
     let lines = vec![
         Line::from(vec![
-            Span::styled("Код: ", Style::default().fg(ACCENT)),
+            Span::styled("Code: ", Style::default().fg(ACCENT)),
             Span::raw(input.to_owned()),
             Span::styled("█", Style::default().fg(ACCENT)),
         ]),
         Line::from(""),
         Line::from(Span::styled(
-            "Enter — принять, Esc — отмена",
+            "Enter — accept, Esc — cancel",
             Style::default().fg(MUTED),
         )),
     ];
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Код подключения ")
+        .title(" Session Code ")
         .border_style(Style::default().fg(ACCENT));
 
     let paragraph = Paragraph::new(lines)
@@ -445,9 +446,9 @@ mod tests {
     fn hotkeys_use_yellow_keys_and_cyan_descriptions() {
         let line = hotkeys_line();
 
-        assert_eq!(line.spans[0].content, "[↑/↓]");
+        assert_eq!(line.spans[0].content, "[1-5]");
         assert_eq!(line.spans[0].style.fg, Some(Color::Yellow));
-        assert_eq!(line.spans[1].content, " - меню");
+        assert_eq!(line.spans[1].content, " - select");
         assert_eq!(line.spans[1].style.fg, Some(Color::Cyan));
         assert_eq!(line.spans[2].content, " • ");
         assert_eq!(line.spans[2].style.fg, Some(Color::Cyan));
@@ -459,7 +460,7 @@ mod tests {
             .collect();
         assert_eq!(
             plain,
-            "[↑/↓] - меню • [Enter] - выбор • [Tab] - логи • [PgUp/PgDn] - прокрутка • [Ctrl+C] - выход"
+            "[1-5] - select • [↑/↓] - menu • [Enter] - confirm • [Tab] - logs • [PgUp/PgDn] - scroll • [Ctrl+C] - quit"
         );
     }
 
@@ -510,7 +511,7 @@ mod tests {
     #[test]
     fn missing_statuses_are_always_red() {
         for line in [
-            ok_line("Права Админа", false, 30),
+            ok_line("Admin Rights", false, 30),
             ok_line("Npcap", false, 30),
             ok_line("Loopback", false, 30),
             presence_line("Log File", false, "[EXISTS]", "[MISSING]", 30),
@@ -543,7 +544,7 @@ mod tests {
 
     #[test]
     fn admin_warning_marker_is_bold_red() {
-        let line = log_line("[WARN] [!] Нет прав администратора");
+        let line = log_line("[WARN] [!] No administrator rights");
         let marker = &line.spans[2];
 
         assert_eq!(marker.content, "[!]");

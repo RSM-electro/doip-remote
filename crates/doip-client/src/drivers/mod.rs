@@ -113,10 +113,10 @@ fn uninstall_npcap() -> Result<(), DriverError> {
     let failure = if uninstaller.is_file() {
         // The original installer uses `-n -u`; plain `-u` can return -1 on
         // Windows 11.
-        tracing::info!("Запуск {} -n -u ...", uninstaller.display());
+        tracing::info!("Running {} -n -u ...", uninstaller.display());
         match Command::new(&uninstaller).args(["-n", "-u"]).status() {
             Ok(status) if status.success() => {
-                tracing::info!("[OK] Npcap удалён.");
+                tracing::info!("[OK] Npcap removed.");
                 None
             }
             Ok(status) => Some(DriverError::InstallerFailed {
@@ -184,7 +184,7 @@ fn npcap_service_present() -> bool {
 /// The L2 drivers are Windows-only, so this is a no-op elsewhere.
 #[cfg(not(target_os = "windows"))]
 pub fn remove_all() -> Result<(), DriverError> {
-    tracing::warn!("Удаление драйверов поддерживается только на Windows.");
+    tracing::warn!("Driver removal is only supported on Windows.");
     Ok(())
 }
 
@@ -230,21 +230,21 @@ pub fn install_all_async(events: UnboundedSender<InstallEvent>) {
 fn install_all_blocking() -> Result<(), DriverError> {
     let status = check_all();
     if status.is_all_ok() {
-        tracing::info!("[OK] Все драйверы уже установлены.");
+        tracing::info!("[OK] All drivers are already installed.");
         return Ok(());
     }
 
     if status.npcap_installed {
-        tracing::info!("Npcap уже установлен, пропускаем.");
+        tracing::info!("Npcap is already installed, skipping.");
     } else {
-        tracing::info!("Npcap не найден. Скачивание установщика с npcap.com...");
+        tracing::info!("Npcap not found. Downloading installer from npcap.com...");
         install_npcap()?;
     }
 
     if status.loopback_installed {
-        tracing::info!("Loopback-адаптер уже установлен, пропускаем.");
+        tracing::info!("Loopback adapter is already installed, skipping.");
     } else {
-        tracing::info!("KM-TEST Loopback Adapter не найден. Запуск установки...");
+        tracing::info!("KM-TEST Loopback Adapter not found. Starting installation...");
         install_loopback()?;
     }
 
@@ -254,7 +254,7 @@ fn install_all_blocking() -> Result<(), DriverError> {
 /// Blocking installation body; stub outside Windows.
 #[cfg(not(target_os = "windows"))]
 fn install_all_blocking() -> Result<(), DriverError> {
-    tracing::warn!("Установка драйверов поддерживается только на Windows.");
+    tracing::warn!("Driver installation is only supported on Windows.");
     Err(DriverError::UnsupportedPlatform)
 }
 
@@ -353,7 +353,7 @@ fn install_npcap() -> Result<(), DriverError> {
     let installer = std::env::temp_dir().join("npcap-1.80.exe");
     download_npcap(&installer)?;
 
-    tracing::info!("Запуск установщика Npcap. Следуйте подсказкам мастера...");
+    tracing::info!("Launching Npcap installer. Follow the wizard prompts...");
     let status = Command::new(&installer).status();
 
     // The installer is always a temporary file; do not leave it behind.
@@ -361,7 +361,7 @@ fn install_npcap() -> Result<(), DriverError> {
     let status = status?;
 
     if status.success() {
-        tracing::info!("[OK] Установщик Npcap завершился успешно.");
+        tracing::info!("[OK] Npcap installer finished successfully.");
         Ok(())
     } else {
         Err(DriverError::InstallerFailed {
@@ -397,7 +397,7 @@ fn download_npcap(destination: &Path) -> Result<(), DriverError> {
             Some(total) if total > 0 => {
                 let percent = downloaded * 100 / total;
                 if percent >= next_percent || downloaded == total {
-                    tracing::info!("Загрузка Npcap: {percent}% ({downloaded} из {total} байт)");
+                    tracing::info!("Downloading Npcap: {percent}% ({downloaded} of {total} bytes)");
                     next_percent = (percent / 10 + 1) * 10;
                 }
             }
@@ -407,7 +407,7 @@ fn download_npcap(destination: &Path) -> Result<(), DriverError> {
 
     file.flush()?;
     tracing::info!(
-        "[OK] Npcap скачан ({} байт): {}",
+        "[OK] Npcap downloaded ({} bytes): {}",
         downloaded,
         destination.display()
     );
@@ -452,7 +452,7 @@ fn install_loopback() -> Result<(), DriverError> {
     // The driver-update API cannot create a device. Make sure a matching
     // devnode exists first, otherwise it returns 0xE000020B.
     if msloop_devnode_exists()? {
-        tracing::info!("Найден существующий devnode *MSLOOP, создание устройства пропущено.");
+        tracing::info!("Found existing *MSLOOP devnode, skipping device creation.");
     } else {
         create_msloop_devnode()?;
     }
@@ -461,7 +461,7 @@ fn install_loopback() -> Result<(), DriverError> {
     let mut reboot_required = BOOL::default();
 
     tracing::info!(
-        "Установка Loopback через UpdateDriverForPlugAndPlayDevicesW (INF: {}, HardwareID: *MSLOOP, flags: 0x{:X}) ...",
+        "Installing Loopback via UpdateDriverForPlugAndPlayDevicesW (INF: {}, HardwareID: *MSLOOP, flags: 0x{:X}) ...",
         netloop_inf.display(),
         flags.0
     );
@@ -481,9 +481,9 @@ fn install_loopback() -> Result<(), DriverError> {
     match result {
         Ok(()) => {
             if reboot_required.as_bool() {
-                tracing::info!("[!] Для завершения установки Loopback нужна перезагрузка.");
+                tracing::info!("[!] A reboot is required to finish Loopback installation.");
             }
-            tracing::info!("[OK] KM-TEST Loopback Adapter установлен.");
+            tracing::info!("[OK] KM-TEST Loopback Adapter installed.");
             Ok(())
         }
         Err(error) => Err(setup_error(
@@ -583,7 +583,7 @@ fn msloop_devnode_exists() -> Result<bool, DriverError> {
                 .to_ascii_uppercase()
                 .contains("*MSLOOP")
         {
-            tracing::info!("Обнаружен devnode *MSLOOP (DevInst {}).", data.DevInst);
+            tracing::info!("Detected *MSLOOP devnode (DevInst {}).", data.DevInst);
             return Ok(true);
         }
     }
@@ -654,7 +654,7 @@ fn remove_loopback() -> Result<(), DriverError> {
     }
 
     if targets.is_empty() {
-        tracing::info!("Loopback-адаптер не найден, удалять нечего.");
+        tracing::info!("Loopback adapter not found, nothing to remove.");
         return Ok(());
     }
 
@@ -793,7 +793,7 @@ fn create_msloop_devnode() -> Result<(), DriverError> {
     };
 
     tracing::info!(
-        "Создание devnode {} с HardwareID *MSLOOP ...",
+        "Creating devnode {} with HardwareID *MSLOOP ...",
         String::from_utf16_lossy(&instance_id[..instance_id.len() - 1])
     );
 
@@ -838,7 +838,7 @@ fn create_msloop_devnode() -> Result<(), DriverError> {
         },
     )?;
 
-    tracing::info!("[OK] Devnode ROOT\\NET создан (DevInst {}).", data.DevInst);
+    tracing::info!("[OK] ROOT\\NET devnode created (DevInst {}).", data.DevInst);
     Ok(())
 }
 

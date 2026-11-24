@@ -8,22 +8,24 @@ and record important architecture decisions as they are made.
 
 ## Current Status (обновляй этот блок каждый день)
 
-- **Date:** 2026-11-23
-- **Phase:** Windows 11 validation; Loopback install **and removal** fixed and
-  verified on the target machine.
+- **Date:** 2026-11-24
+- **Phase:** Client UX finalization (English localization, hotkeys, UAC, cleanup
+  hardening) before moving to the network layer.
 - **Done:** Stage 6/6 — `--mock` mode and final verification. The client is now a
   ratatui dashboard with a menu, dot-aligned status panel, scrolling log console,
   background driver installation, UAC gate and a cleanup modal. `inquire` is gone.
   Follow-up: the key-hint row is now readable (bold yellow keys, cyan actions),
   and `--mock` no longer fakes the connection: the status stays `Disconnected`
   (`[ОТКЛЮЧЕНО]`) until the relay server exists.
-  UI polish: white bold header, strictly red `[НЕТ]`/`[MISSING]` statuses, a
-  `Log File` status row, a bold red `[!]` admin warning marker, and a green
-  session-code popup after the Car action.
-  Lifecycle: the menu now has separate "Удалить драйверы и логи" and
-  "Завершить диагностику" entries; cleanup swaps the file writer for a sink,
-  deletes `doip-remote.log` without Windows lock errors and keeps the app running
-  with refreshed statuses.
+  UI polish: white bold header, strictly red `[MISSING]`/`[DISCONNECTED]`
+  statuses, a `Log File` status row, a bold red `[!]` admin warning marker, and
+  a green session-code popup after the Car action.
+  Lifecycle: the menu has "4. Uninstall drivers and logs" and "5. Exit"; cleanup
+  swaps the file writer for a sink, deletes `doip-remote.log` without Windows
+  lock errors and keeps the app running with refreshed statuses.
+  **Stage 1 (2026-11-24):** all UI strings translated to English; numeric
+  hotkeys `1-5` select and trigger menu items immediately; menu shows numbered
+  labels; top hint bar includes `[1-5] - select`.
   Shutdown: `net::NetworkService` owns a cancellation token and a join set; every
   exit path cancels it and waits for tasks to drop their sockets.
   Drivers & extras: Npcap is uninstalled via `NPFInstall.exe -n -u` (with a
@@ -138,29 +140,30 @@ driver flow is validated.
 ## Current TUI behavior
 
 - **Layout:** header (`=== DoIP Remote ===` plus key hints), middle row split
-  70/30 into the menu and the dot-aligned status panel, bottom `[ ЛОГИ ]`
+  70/30 into the menu and the dot-aligned status panel, bottom `[ LOGS ]`
   console. Modals are drawn on top. The header title is **white and bold**;
   the package version (`v0.1.0`) is shown in the top-right corner.
 - **Key hints:** built from the `HOTKEYS` table in `ui.rs` and rendered as
-  `[ключ] - действие • ...`; key caps are bold yellow, separators and action
-  descriptions are cyan so the row stays readable on a dark terminal.
+  `[key] - action • ...`; key caps are bold yellow, separators and action
+  descriptions are cyan. Includes `[1-5] - select`.
 - **Startup driver check** (before the first frame):
   - Windows: Npcap is detected via
     `%SystemRoot%\System32\Npcap\wpcap.dll`; Loopback is detected by searching
     adapter name/description for `Loopback`/`KM-TEST` via `Get-NetAdapter`
     (`netsh` fallback). Admin rights are probed with `net session`.
   - Linux/non-Windows: stub returning `false`/`false`; admin is `false`.
-- **Status panel:** `Права Админа`, `Npcap` and `Loopback` (green `[OK]` / red
-  `[НЕТ]` — a missing value is **never** green), `Log File` (green `[EXISTS]` /
-  red `[MISSING]`, based on `doip-remote.log`), and `Соединение` (red
-  `[ОТКЛЮЧЕНО]` / green `[ЕСТЬ КОНТАКТ ✓]`). The connection is always
-  `Disconnected`: the `Connected` variant is reserved for the future relay and is
-  never constructed, including in `--mock` mode.
-- **Menu:** Install / Car / Diag / Delete drivers and logs (red) / Finish
-  diagnostics.
-- **Navigation:** `↑`/`↓` move (or scroll logs), `Enter` activates, `Tab`
-  toggles menu/log focus, `PageUp`/`PageDown` scroll the log panel, `Ctrl+C`
-  quits. `Esc` closes a popup; in the menu it quits.
+- **Status panel:** `Admin Rights`, `Npcap` and `Loopback` (green `[OK]` / red
+  `[MISSING]` — a missing value is **never** green), `Log File` (green `[EXISTS]`
+  / red `[MISSING]`, based on `doip-remote.log`), and `Connection` (red
+  `[DISCONNECTED]` / green `[CONNECTED ✓]`). The connection is always
+  `Disconnected` until the relay exists.
+- **Menu:** `1. Install Drivers` / `2. I am near the car (Car)` /
+  `3. I am a diagnostician (Diag)` / `4. Uninstall drivers and logs` (red) /
+  `5. Exit`.
+- **Navigation:** `1-5` select and trigger menu items immediately; `↑`/`↓` move
+  (or scroll logs), `Enter` activates, `Tab` toggles menu/log focus,
+  `PageUp`/`PageDown` scroll the log panel, `Ctrl+C` quits. `Esc` closes a
+  popup; in the menu it quits.
 - **Logs:** written to `doip-remote.log` next to the executable and mirrored into
   the panel by a custom `tracing` layer (ring buffer, 1000 lines). Levels are
   colour-coded; admin warnings start with a bold red `[!]` marker. The file layer
@@ -183,19 +186,16 @@ driver flow is validated.
   clipboard and logs `[INFO] Code copied to clipboard!`; `Esc` closes the popup.
 - **Diag:** opens a popup; typed/pasted code is parsed on `Enter`, and the
   target IP, DoIP port and relay server are logged.
-- **Delete drivers and logs:** opens a `Y/N` confirmation popup. `Y` runs the
-  Npcap uninstaller (`C:\Program Files\Npcap\NPFInstall.exe -n -u`, waited for),
-  removes the KM-TEST Loopback devnodes (`*MSLOOP`) via `SetupDiRemoveDevice`,
-  then swaps the file log writer for a sink, drops the old appender guard
-  (closing the file handle) and deletes `doip-remote.log`; the app **keeps
+- **Uninstall drivers and logs:** opens a confirmation popup (currently `Y/N`,
+  will become `Enter/Esc` in Stage 2). Confirmed cleanup runs the Npcap
+  uninstaller (`NPFInstall.exe -n -u`), removes KM-TEST Loopback devnodes
+  (`*MSLOOP`) via `SetupDiRemoveDevice`, swaps the file log writer for a sink,
+  drops the old appender guard and deletes `doip-remote.log`; the app **keeps
   running**. Cleanup never sets `should_quit`, never cancels the network
-  `CancellationToken` and never stops the tokio runtime — control returns to
-  the ratatui event loop. Npcap and Loopback removals are independent. When the
-  `npcap` service is gone but `%SystemRoot%\System32\Npcap` remains, the stale
-  folder is deleted. Driver/log statuses are re-probed after cleanup (from the
-  filesystem for `Log File`) so the panel shows `Npcap [НЕТ]` / `Loopback [НЕТ]`
-  / `Log File [MISSING]`. Later tracing calls continue through the in-memory UI
-  layer and a kept-alive no-op file writer.
+  `CancellationToken` and never stops the tokio runtime. Driver/log statuses are
+  re-probed after cleanup so the panel shows `Npcap [MISSING]` /
+  `Loopback [MISSING]` / `Log File [MISSING]`. Later tracing calls continue
+  through the in-memory UI layer and a kept-alive no-op file writer.
 - **Finish diagnostics:** exits the application and cancels the network token;
   active tasks stop and their sockets are closed before the process ends.
 - **`--mock`:** forces admin rights and both driver statuses green so the
@@ -226,7 +226,7 @@ cargo clippy -p doip-client --all-targets --target x86_64-pc-windows-msvc -- -D 
 ## Last verification (2026-11-23)
 
 - `cargo build --release` — OK.
-- `cargo test --workspace` — 27 `doip-client` + 17 `doip-core` tests + 1 doctest,
+- `cargo test --workspace` — 29 `doip-client` + 17 `doip-core` tests + 1 doctest,
   all passing.
 - `cargo fmt --all --check` and
   `cargo clippy --workspace --all-targets -- -D warnings` — clean.
@@ -289,7 +289,7 @@ cargo clippy -p doip-client --all-targets --target x86_64-pc-windows-msvc -- -D 
 - `doip-core` has `#![forbid(unsafe_code)]` and `#![warn(missing_docs)]`; keep
   public APIs documented. Isolate any unavoidable `unsafe` in the L2/driver
   layer later, never in the protocol core.
-- UI strings are Russian; code, comments, README and commit messages are English.
+- UI strings are English; code, comments, README and commit messages are English.
 - Add unit tests for every parsing/state-machine change.
 - Do not commit `/target`, `.env`, credentials, tokens or generated keys.
 - Before committing: fmt, clippy with `-D warnings`, workspace tests.

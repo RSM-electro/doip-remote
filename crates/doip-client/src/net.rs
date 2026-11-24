@@ -53,7 +53,7 @@ impl NetworkService {
             });
         }
 
-        info!("Сетевые задачи запущены (заглушка).");
+        info!("Network tasks started (stub).");
 
         Self { cancel, tasks }
     }
@@ -65,19 +65,19 @@ impl NetworkService {
         let drained = tokio::time::timeout(SHUTDOWN_GRACE, async {
             while let Some(result) = self.tasks.join_next().await {
                 if let Err(error) = result {
-                    warn!("Сетевая задача завершилась с ошибкой: {error}");
+                    warn!("Network task ended with error: {error}");
                 }
             }
         })
         .await;
 
         if drained.is_err() {
-            warn!("Сетевые задачи не остановились вовремя, завершаем принудительно.");
+            warn!("Network tasks did not stop in time, aborting.");
             self.tasks.abort_all();
             while self.tasks.join_next().await.is_some() {}
         }
 
-        info!("[OK] Сетевые задачи остановлены, сокеты закрыты.");
+        info!("[OK] Network tasks stopped, sockets closed.");
     }
 }
 
@@ -97,7 +97,7 @@ async fn ping_task(cancel: CancellationToken) {
 async fn bind_and_serve(addr: SocketAddr, cancel: CancellationToken) {
     match TcpListener::bind(addr).await {
         Ok(listener) => serve_listener(listener, cancel).await,
-        Err(error) => warn!("Не удалось открыть сокет {addr}: {error}"),
+        Err(error) => warn!("Failed to open socket {addr}: {error}"),
     }
 }
 
@@ -107,7 +107,7 @@ async fn bind_and_serve(addr: SocketAddr, cancel: CancellationToken) {
 /// `TIME_WAIT` for the listener itself; accepted streams are reset explicitly.
 async fn serve_listener(listener: TcpListener, cancel: CancellationToken) {
     if let Ok(addr) = listener.local_addr() {
-        info!("Слушатель DoIP запущен на {addr} (заглушка).");
+        info!("DoIP listener started on {addr} (stub).");
     }
 
     loop {
@@ -116,7 +116,7 @@ async fn serve_listener(listener: TcpListener, cancel: CancellationToken) {
             accepted = listener.accept() => match accepted {
                 Ok((stream, peer)) => close_stream(stream, peer),
                 Err(error) => {
-                    warn!("Ошибка accept: {error}");
+                    warn!("Accept error: {error}");
                     break;
                 }
             },
@@ -125,7 +125,7 @@ async fn serve_listener(listener: TcpListener, cancel: CancellationToken) {
 
     // Dropping the listener closes the listening socket and releases the port.
     drop(listener);
-    info!("Слушатель DoIP остановлен.");
+    info!("DoIP listener stopped.");
 }
 
 /// Closes an accepted connection without leaving it in `TIME_WAIT`.
@@ -134,10 +134,10 @@ async fn serve_listener(listener: TcpListener, cancel: CancellationToken) {
 fn close_stream(stream: TcpStream, peer: SocketAddr) {
     // Linger(0) sends RST on close instead of a graceful FIN handshake.
     if let Err(error) = stream.set_linger(Some(Duration::ZERO)) {
-        warn!("Не удалось выставить linger для {peer}: {error}");
+        warn!("Failed to set linger for {peer}: {error}");
     }
     drop(stream);
-    info!("Соединение с {peer} закрыто.");
+    info!("Connection with {peer} closed.");
 }
 
 #[cfg(test)]
