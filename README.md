@@ -100,7 +100,7 @@ Menu entries:
    clipboard (`Code copied to clipboard!`), `Esc` to close.
 3. **Я диагност (Diag)** — opens a popup for pasting a session code.
 4. **Удалить драйверы и логи** (red) — asks for confirmation, removes the
-   drivers and deletes `doip-remote.log`, then keeps the app running with the
+   drivers and deletes the log file, then keeps the app running with the
    refreshed statuses.
 5. **Завершить диагностику** — exits.
 
@@ -114,8 +114,10 @@ Keyboard:
 | `PageUp` / `PageDown` | Scroll the log console (logs focused) |
 | `Ctrl+C` | Quit immediately, restoring the terminal and closing network sockets |
 
-Logs are written both to `doip-remote.log` (next to the executable) and to the
-console. The terminal is always restored on exit, on `Ctrl+C` and on panic.
+Logs are written both to `doip-remote.log` on the user's Desktop
+(`%USERPROFILE%\Desktop`, or `~/Desktop`; the home directory is used if
+`Desktop` does not exist) and to the console. The terminal is always restored
+on exit, on `Ctrl+C` and on panic.
 Networking is still a stub; the session-code generator/parser and the Windows
 driver flow are real. Choosing **Удалить драйверы и логи** closes the file writer
 before deleting the log, so the app keeps running without Windows sharing

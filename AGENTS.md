@@ -23,6 +23,10 @@ and record important architecture decisions as they are made.
   Lifecycle: the menu has "4. Uninstall drivers and logs" and "5. Exit"; cleanup
   swaps the file writer for a sink, deletes `doip-remote.log` without Windows
   lock errors and keeps the app running with refreshed statuses.
+  **Log location (2026-11-24):** `doip-remote.log` is always created on the
+  user's Desktop (`USERPROFILE` on Windows, `HOME` on Linux), falling back to the
+  home directory when `Desktop` does not exist. The exact resolved path is logged
+  at startup and cleanup deletes that same resolved path.
   **Stage 1 (2026-11-24):** all UI strings translated to English; numeric
   hotkeys `1-5` select and trigger menu items immediately; menu shows numbered
   labels; top hint bar includes `[1-5] - select`.
@@ -202,8 +206,10 @@ driver flow is validated.
   (or scroll logs), `Enter` activates, `Tab` toggles menu/log focus,
   `PageUp`/`PageDown` scroll the log panel, `Ctrl+C` quits. `Esc` closes a
   popup; in the menu it quits.
-- **Logs:** written to `doip-remote.log` next to the executable and mirrored into
-  the panel by a custom `tracing` layer (ring buffer, 1000 lines). Levels are
+- **Logs:** written to `doip-remote.log` on the user's Desktop
+  (`[USERPROFILE]\Desktop\doip-remote.log` on Windows, `$HOME/Desktop/...` on
+  Linux; falls back to `[home]/doip-remote.log` when `Desktop` is missing) and
+  mirrored into the panel by a custom `tracing` layer (ring buffer, 1000 lines). Levels are
   colour-coded; admin warnings start with a bold red `[!]` marker. The file layer
   is reloadable: cleanup disables it while the in-memory mirror keeps working.
   A panic hook writes panic message, location and forced backtrace to

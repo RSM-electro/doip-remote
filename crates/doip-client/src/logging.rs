@@ -2,7 +2,8 @@
 //!
 //! Every event is written to two sinks:
 //!
-//! * `doip-remote.log` next to the executable (for later inspection);
+//! * `doip-remote.log` on the user's Desktop (falling back to the home
+//!   directory when `Desktop` is missing);
 //! * an in-memory ring buffer that the TUI renders in the `[ LOGS ]` panel.
 //!
 //! The in-memory mirror is implemented as a custom [`Layer`], so any
@@ -30,8 +31,11 @@ use tracing_subscriber::{
     reload, Registry,
 };
 
-/// Name of the log file written next to the executable.
+/// Name of the log file written to the user's Desktop.
 pub const LOG_FILE_NAME: &str = "doip-remote.log";
+
+/// Preferred subdirectory of the home directory for the log file.
+const DESKTOP_DIR: &str = "Desktop";
 
 /// Maximum number of lines kept in the in-memory buffer.
 const MAX_BUFFERED_LINES: usize = 1000;
@@ -54,11 +58,13 @@ pub struct Logger {
     reload: reload::Handle<FileLayer, BaseSubscriber>,
     guard: Option<WorkerGuard>,
     sink_guard: Option<WorkerGuard>,
+    path: PathBuf,
 }
 
 impl Logger {
-    /// Disables file logging, deletes `doip-remote.log` and keeps the in-memory
-    /// log mirror working so the cleanup itself can still be reported in the UI.
+    /// Disables file logging, deletes the resolved log file and keeps the
+    /// in-memory log mirror working so the cleanup itself can still be reported
+    /// in the UI.
     ///
     /// Order matters on Windows: the file writer is swapped for a sink and the
     /// old appender guard is dropped (closing the handle) before `remove_file`.
@@ -76,8 +82,7 @@ impl Logger {
         // Stops the old appender thread and closes the log file handle.
         drop(self.guard.take());
 
-        let path = log_file_path();
-        match std::fs::remove_file(&path) {
+        match std::fs::remove_file(&self.path) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error),
@@ -96,16 +101,56 @@ fn file_layer(writer: NonBlocking) -> FileLayer {
         .with_target(false)
 }
 
-/// Returns the path of `doip-remote.log`, next to the current executable.
+/// Returns the user's home directory.
 ///
-/// Falls back to the current working directory when the executable path is
-/// unavailable.
+/// Windows uses `USERPROFILE` (with `HOMEDRIVE` + `HOMEPATH` as a fallback);
+/// other platforms use `HOME`.
+fn home_directory() -> Option<PathBuf> {
+    fn env_path(name: &str) -> Option<PathBuf> {
+        std::env::var_os(name)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        env_path("USERPROFILE").or_else(|| {
+            let mut home = env_path("HOMEDRIVE")?;
+            home.push(env_path("HOMEPATH")?);
+            Some(home)
+        })
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        env_path("HOME")
+    }
+}
+
+/// Places the log in `home/Desktop` when that directory exists, otherwise
+/// directly in `home`.
+fn log_path_in(home: &Path, desktop_exists: bool) -> PathBuf {
+    if desktop_exists {
+        home.join(DESKTOP_DIR).join(LOG_FILE_NAME)
+    } else {
+        home.join(LOG_FILE_NAME)
+    }
+}
+
+/// Returns the path of `doip-remote.log`.
+///
+/// The preferred location is `[USERPROFILE]/Desktop/doip-remote.log` on Windows
+/// and `$HOME/Desktop/doip-remote.log` elsewhere. If the Desktop directory does
+/// not exist, the log falls back to the home directory itself. Only when no home
+/// directory can be resolved does it fall back to the current working directory.
 #[must_use]
 pub fn log_file_path() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(Path::to_path_buf))
-        .unwrap_or_else(|| PathBuf::from("."))
+    if let Some(home) = home_directory() {
+        return log_path_in(&home, home.join(DESKTOP_DIR).is_dir());
+    }
+
+    std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
         .join(LOG_FILE_NAME)
 }
 
@@ -144,6 +189,7 @@ pub fn init(logs: Arc<Mutex<VecDeque<String>>>) -> Option<Logger> {
         reload,
         guard: Some(guard),
         sink_guard: None,
+        path,
     })
 }
 
@@ -236,7 +282,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn log_file_lives_next_to_the_executable() {
+    fn log_file_prefers_the_desktop() {
+        let home = Path::new("home");
+        let path = log_path_in(home, true);
+
+        assert_eq!(path, home.join(DESKTOP_DIR).join(LOG_FILE_NAME));
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some(LOG_FILE_NAME)
+        );
+    }
+
+    #[test]
+    fn log_file_falls_back_to_the_home_directory() {
+        let home = Path::new("home");
+        let path = log_path_in(home, false);
+
+        assert_eq!(path, home.join(LOG_FILE_NAME));
+    }
+
+    #[test]
+    fn resolved_log_path_uses_the_log_file_name() {
         let path = log_file_path();
 
         assert_eq!(
