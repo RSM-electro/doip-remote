@@ -9,6 +9,7 @@
 # Logs and temporary files
 *.log
 *.tmp
+panic.log
 
 # Editor / OS noise
 .idea/

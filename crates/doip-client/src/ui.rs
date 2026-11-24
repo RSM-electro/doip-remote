@@ -153,9 +153,9 @@ fn draw_menu(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn menu_line(item: MenuItem, selected: bool, app: &App) -> Line<'static> {
-    let prefix = if selected { "> " } else { "  " };
-    let mut style = Style::default();
     let disabled = app.is_cleaned_up && item != MenuItem::Exit;
+    let prefix = if selected && !disabled { "> " } else { "  " };
+    let mut style = Style::default();
 
     if item.is_dangerous() {
         style = style.fg(Color::Red);

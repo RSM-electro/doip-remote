@@ -31,8 +31,42 @@ use tracing::{error, info, warn};
 /// Placeholder relay address until the networking layer is implemented.
 const RELAY_SERVER: &str = "auto";
 
+fn install_panic_log_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let path = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.join("panic.log")))
+            .unwrap_or_else(|| std::path::PathBuf::from("panic.log"));
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            use std::io::Write;
+            let _ = writeln!(file, "=== PANIC ===");
+            let _ = writeln!(file, "{info}");
+            if let Some(location) = info.location() {
+                let _ = writeln!(
+                    file,
+                    "at {}:{}:{}",
+                    location.file(),
+                    location.line(),
+                    location.column()
+                );
+            }
+            let backtrace = std::backtrace::Backtrace::force_capture();
+            let _ = writeln!(file, "{backtrace}");
+            let _ = writeln!(file);
+            let _ = file.flush();
+        }
+        previous(info);
+    }));
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
+    install_panic_log_hook();
     let mock = std::env::args().skip(1).any(|arg| arg == "--mock");
 
     let logs = Arc::new(Mutex::new(VecDeque::new()));
@@ -442,6 +476,10 @@ fn confirm_cleanup(
     }
 
     // Always force the cleaned-up UI state, even if a step panicked.
+    // IMPORTANT: keep the menu index on the disabled cleanup item. Moving it to
+    // Exit here would let a repeated Enter (key auto-repeat or a second press)
+    // immediately quit the app right after cleanup, which looks like a crash.
+    // Only an explicit numeric `5` or navigating to Exit can quit from here.
     let status = drivers::check_all();
     app.apply_cleanup_status(
         status.npcap_installed,
@@ -449,10 +487,6 @@ fn confirm_cleanup(
         logging::log_file_path().is_file(),
     );
     app.is_cleaned_up = true;
-    app.menu_index = MenuItem::ALL
-        .iter()
-        .position(|item| *item == MenuItem::Exit)
-        .unwrap_or(app.menu_index);
 }
 
 fn cleanup_sequence(

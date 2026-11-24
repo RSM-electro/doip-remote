@@ -44,6 +44,14 @@ and record important architecture decisions as they are made.
   sequence: cancel `CancellationToken`, remove Npcap/Loopback, swap file logger to
   sink/drop guard/delete log, force driver/log status refresh, set `is_cleaned_up`
   and lock menu 1-4 (DarkGray, inputs ignored), only `5. Exit` active.
+  **Cleanup-crash root cause (2026-11-24, reproduced on Windows 11):** `panic.log`
+  hook was added, but repro showed **no panic**. Sending `4` + `Enter` kept the app
+  alive; sending `4` + `Enter` + `Enter` made it exit with code 0. Cause: cleanup
+  moved `menu_index` to `5. Exit`, so a repeated/auto-repeated Enter immediately
+  activated Exit. Fix: leave the selection on the disabled cleanup item after
+  cleanup; repeated Enter is ignored, only numeric `5` (or explicit navigation to
+  Exit) quits. Verified with elevated release exe: double-Enter after cleanup keeps
+  the app alive; `1` ignored; `5` exits.
   Shutdown: `net::NetworkService` owns a cancellation token and a join set; every
   exit path cancels it and waits for tasks to drop their sockets.
   Drivers & extras: Npcap is uninstalled via `NPFInstall.exe -n -u` (with a
@@ -73,8 +81,9 @@ and record important architecture decisions as they are made.
   cleanup paths are now green. Server/relay work (`doip-server`) remains
   postponed.
 - **Repo state:** branch `main`; recent commits include Stage 1-3 UX hardening,
-  `feat(ui): add confirmation modal for active session exit`, and
-  `fix(lifecycle): definitively resolve cleanup crash and implement strict menu blocking`.
+  `feat(ui): add confirmation modal for active session exit`,
+  `fix(lifecycle): definitively resolve cleanup crash and implement strict menu blocking`,
+  and this cleanup-crash root-cause fix with `panic.log` diagnostics.
 
 ## Architecture
 
@@ -183,6 +192,8 @@ driver flow is validated.
   the panel by a custom `tracing` layer (ring buffer, 1000 lines). Levels are
   colour-coded; admin warnings start with a bold red `[!]` marker. The file layer
   is reloadable: cleanup disables it while the in-memory mirror keeps working.
+  A panic hook writes panic message, location and forced backtrace to
+  `panic.log` next to the executable (gitignored via `*.log` and explicit entry).
 - **Install (Windows):** a background task streams the Npcap 1.80 download with
   percentage progress in the log, runs the installer **without** `/S`, then
   installs the KM-TEST Loopback adapter. That step first ensures a devnode with
