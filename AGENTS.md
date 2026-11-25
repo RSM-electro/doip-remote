@@ -93,21 +93,28 @@ and record important architecture decisions as they are made.
   `embed-resource` for Windows targets; the UAC manifest is embedded in release
   builds (`.manifest_required()` on Windows hosts) and omitted in debug builds so
   test binaries can run without elevation.
-- **Next Step:** Finish the remaining items of the Windows 11 checklist below
-  (icon rendering, non-admin warning, localized names); the Loopback install and
-  cleanup paths are now green. Server/relay work (`doip-server`) remains
-  postponed.
+  **Server checkpoint 1 (2026-11-25):** added `crates/doip-protocol` with the
+  versioned relay handshake (`Hello` → `Waiting`/`Paired`/`Error`), `u32`-BE
+  length-prefixed JSON control frames capped at 16 KiB, field validation and
+  async read/write helpers. `Role` now serializes as `car`/`diag`. 9 protocol
+  tests + 17 core tests pass.
+- **Next Step:** Server checkpoint 2 — add `crates/doip-server` (session
+  registry, role pairing, raw bidirectional tunnel, integration tests), then
+  checkpoint 3 — install Rust on `176.53.237.193` and run a loopback smoke test.
+  Client relay integration follows once the server is proven. The remaining
+  Windows 11 checklist items are non-blocking.
 - **Repo state:** branch `main`; recent commits include Stage 1-3 UX hardening,
   `feat(ui): add confirmation modal for active session exit`,
   `fix(lifecycle): definitively resolve cleanup crash and implement strict menu blocking`,
-  the `panic.log` diagnostics commit, and this strict post-cleanup lifecycle fix
-  (console isolation, quit fence, hidden-window restoration).
+  the `panic.log` diagnostics commit, the strict post-cleanup lifecycle fix
+  (console isolation, quit fence, hidden-window restoration), and the plaintext
+  relay protocol checkpoint.
 
 ## Architecture
 
-- **Current focus:** `doip-client` interface and Windows driver management.
-  The relay/server (`doip-server`) is postponed until the Windows client driver
-  flow is validated.
+- **Current focus:** the plaintext relay backend (`doip-server`). The client
+  interface and Windows driver management are complete enough for backend work;
+  client relay integration follows after the server checkpoint.
 - **Topology:** `Car (Windows) <-> Relay Server (Linux) <-> Diag (Windows)`.
 - **Data path (planned):** the car-side agent tunnels DoIP traffic to the relay;
   the diagnostic client joins the same session using a `DT1-...` session code.
@@ -131,6 +138,7 @@ and record important architecture decisions as they are made.
 doip-remote/
 ├── crates/
 │   ├── doip-core/     # SessionCode, Role, errors, session-code tests
+│   ├── doip-protocol/ # Relay handshake messages, validation and framing
 │   └── doip-client/   # Interactive ratatui client (binary)
 │       ├── build.rs   # PNG -> multi-size ICO + Windows resource linking
 │       ├── icon.png   # Source application icon (1254×1254 PNG)
@@ -150,8 +158,7 @@ doip-remote/
 └── README.md
 ```
 
-Planned: `crates/doip-server` (relay) — **postponed** until the Windows client
-driver flow is validated.
+Planned: `crates/doip-server` (relay) — next backend checkpoint.
 
 ## Session code format (implemented)
 
@@ -178,6 +185,26 @@ driver flow is validated.
   non-empty; port `0` is rejected.
 - The client uses `server = "auto"` as a placeholder until the relay address is
   agreed.
+
+## Relay protocol (plaintext, v1)
+
+Implemented in `crates/doip-protocol`; shared by the future client integration
+and `doip-server`.
+
+- Handshake only: `u32` big-endian length + compact JSON. Maximum frame 16 KiB.
+  The body is read only after the length check, so oversized frames are rejected
+  without allocation.
+- Client: `{"type":"hello","v":1,"session":"…","token":"…","role":"car|diag","client":"…"}`.
+  `session` is required (≤128 bytes), `token` required (≤256 bytes), `client`
+  optional (≤64 bytes). Version must be `1`.
+- Server: `waiting`, `paired`, or `error` with a snake_case `code`
+  (`bad_frame`, `unsupported_version`, `invalid_hello`, `token_mismatch`,
+  `role_taken`, `too_many_sessions`, `pending_timeout`, `handshake_timeout`,
+  `server_shutdown`).
+- After `paired`, framing stops and both sockets carry raw bytes; the relay is a
+  transparent L4 pipe.
+- Tests: 9 unit tests in `doip-protocol` cover round-trips, JSON shape, role
+  serialization, validation, empty/oversized/invalid frames.
 
 ## Current TUI behavior
 
@@ -268,6 +295,7 @@ cd doip-remote
 source "$HOME/.cargo/env"   # if cargo is not on PATH
 cargo build --workspace
 cargo test --workspace
+cargo test -p doip-protocol
 cargo run -p doip-client
 cargo run -p doip-client -- --mock   # preview with admin/drivers emulated
 cargo clippy --workspace --all-targets -- -D warnings
@@ -284,6 +312,9 @@ cargo clippy -p doip-client --all-targets --target x86_64-pc-windows-msvc -- -D 
 - `cargo build --release` — OK.
 - `cargo test --workspace` — 29 `doip-client` + 17 `doip-core` tests + 1 doctest,
   all passing.
+- Protocol checkpoint (2026-11-25): `cargo test -p doip-protocol -p doip-core`
+  — 9 protocol + 17 core tests pass; `cargo clippy -p doip-protocol -p doip-core
+  --all-targets -- -D warnings` — clean.
 - `cargo fmt --all --check` and
   `cargo clippy --workspace --all-targets -- -D warnings` — clean.
 - Windows target code: `cargo check`/`clippy` for
@@ -338,6 +369,12 @@ cargo clippy -p doip-client --all-targets --target x86_64-pc-windows-msvc -- -D 
   compilation failure there is a hard error.
 - TUI stack: `ratatui 0.26` + `crossterm 0.27`; logs use `tracing-appender 0.2`.
   `inquire` was removed in stage 1.
+- Relay host: `176.53.237.193` (`root` SSH key already installed), Debian 13,
+  hostname `doip-relay`, 2 vCPU / 3.8 GiB RAM / 3.7 GiB free. `ufw` is active and
+  allows `22/tcp` and `13500/tcp`; nothing listens on 13500 yet. Rust, git and
+  gcc are **not installed** there; `apt` and `rustup` downloads work.
+- The relay is plaintext-only for now (no TLS, no end-to-end encryption), so it
+  is for development/staging. Do not expose real vehicle traffic yet.
 
 ## Conventions
 
@@ -350,10 +387,10 @@ cargo clippy -p doip-client --all-targets --target x86_64-pc-windows-msvc -- -D 
 - Do not commit `/target`, `.env`, credentials, tokens or generated keys.
 - Before committing: fmt, clippy with `-D warnings`, workspace tests.
 
-## Next Step — Windows 11 validation
+## Windows 11 validation checklist
 
-Server/relay work is **postponed**. The next milestone is validating the client
-and its driver flow on real Windows 11:
+These items remain open but are **non-blocking** for relay development. Validate
+the client and its driver flow on real Windows 11:
 
 - [x] `cargo build --release` and `cargo test --workspace` on Windows 11.
 - [ ] Confirm the built `.exe` shows the custom icon in Explorer and on the
@@ -384,24 +421,26 @@ and its driver flow on real Windows 11:
 - [ ] Confirm Ctrl+C and window close restore the console (no broken prompt).
 - [ ] Only after this is green, resume `doip-server` work.
 
-## Postponed: relay/server design questions
+## Relay design decisions
 
-Decide these when `doip-server` is resumed:
+Still open:
 
-- [ ] Wire framing after TCP accept: length-prefixed frames? JSON or binary?
-- [ ] Handshake/authentication with `session_id` + `token`; replay protection,
-      expiry and one-Car/one-Diag session slots.
-- [ ] Relay registration and pairing lifecycle, timeouts, reconnect behavior.
-- [ ] How the relay address (`server` field) is discovered/configured; replace
-      the `"auto"` placeholder.
+- [x] Wire framing: `u32` BE length-prefixed JSON for the handshake; raw bytes
+      after pairing.
+- [x] Handshake/authentication: `session_id` + `token`, one Car and one Diag per
+      session, duplicate role and token mismatch rejected.
+- [ ] Pending-session expiry, reconnect behavior and rate limiting details.
+- [ ] How the relay address (`server` field) is configured; replace `"auto"`.
+- [ ] TLS termination at the relay and certificate strategy.
 - [ ] Where X25519 + ChaCha20-Poly1305 fits: end-to-end or relay-terminated?
 - [ ] L4 proxy semantics, port mapping and DoIP payload transparency.
 - [ ] L2 data path later: Npcap capture + KM-TEST Loopback integration.
 
 ## How to resume
 
-1. Read this **Current Status** block and the Windows 11 checklist above.
+1. Read this **Current Status** block and the server checkpoints.
 2. `git log --oneline -5` and `git status` in `doip-remote`.
 3. Run `cargo test --workspace` to confirm the baseline.
-4. Continue with **Next Step** (Windows 11 validation); server work is postponed.
-   Update this file, then commit.
+4. Continue with the next server checkpoint in the **Current Status** block:
+   `doip-server` registry/tunnel, then deployment and client integration.
+   The Windows 11 checklist is non-blocking. Update this file, then commit.

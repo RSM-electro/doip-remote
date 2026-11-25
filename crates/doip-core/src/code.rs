@@ -17,7 +17,8 @@ pub const CODE_PREFIX: &str = "DT1-";
 pub const DEFAULT_DOIP_PORT: u16 = 13400;
 
 /// The side of the tunnel a session belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Role {
     /// The agent running next to the vehicle.
     Car,
