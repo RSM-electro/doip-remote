@@ -98,11 +98,20 @@ and record important architecture decisions as they are made.
   length-prefixed JSON control frames capped at 16 KiB, field validation and
   async read/write helpers. `Role` now serializes as `car`/`diag`. 9 protocol
   tests + 17 core tests pass.
-- **Next Step:** Server checkpoint 2 — add `crates/doip-server` (session
-  registry, role pairing, raw bidirectional tunnel, integration tests), then
-  checkpoint 3 — install Rust on `176.53.237.193` and run a loopback smoke test.
-  Client relay integration follows once the server is proven. The remaining
-  Windows 11 checklist items are non-blocking.
+  **Server checkpoint 2 (2026-11-25):** added `crates/doip-server` (library +
+  binary) with a Tokio accept loop, handshake timeout, session registry,
+  token/role checks, pending TTL and pending-session cap, `Waiting`/`Paired`/
+  `Error` responses, raw `copy_bidirectional` tunnels, cancellable graceful
+  shutdown and CLI flags. 12 integration tests over real loopback TCP cover
+  forwarding, 1 MiB payloads, session isolation, wrong token, duplicate role,
+  malformed/oversized frames, handshake and pending timeouts, disconnect
+  propagation, shutdown and the pending-session cap.
+- **Next Step:** Server checkpoint 3 — deploy `doip-server` to
+  `176.53.237.193` (install rustup/build tools), run it under systemd and
+  smoke-test pairing/forwarding over the public 13500 port. Then integrate the
+  relay into `doip-client` (Car vehicle dial-out, Diag local
+  `127.0.0.1:13400` listener). The remaining Windows 11 checklist items are
+  non-blocking.
 - **Repo state:** branch `main`; recent commits include Stage 1-3 UX hardening,
   `feat(ui): add confirmation modal for active session exit`,
   `fix(lifecycle): definitively resolve cleanup crash and implement strict menu blocking`,
@@ -139,6 +148,7 @@ doip-remote/
 ├── crates/
 │   ├── doip-core/     # SessionCode, Role, errors, session-code tests
 │   ├── doip-protocol/ # Relay handshake messages, validation and framing
+│   ├── doip-server/   # Plaintext relay (binary + testable library)
 │   └── doip-client/   # Interactive ratatui client (binary)
 │       ├── build.rs   # PNG -> multi-size ICO + Windows resource linking
 │       ├── icon.png   # Source application icon (1254×1254 PNG)
@@ -158,7 +168,7 @@ doip-remote/
 └── README.md
 ```
 
-Planned: `crates/doip-server` (relay) — next backend checkpoint.
+Next: deploy `doip-server` to the relay host and integrate it into the client.
 
 ## Session code format (implemented)
 
@@ -205,6 +215,15 @@ and `doip-server`.
   transparent L4 pipe.
 - Tests: 9 unit tests in `doip-protocol` cover round-trips, JSON shape, role
   serialization, validation, empty/oversized/invalid frames.
+- Server rules (`crates/doip-server`): one Car + one Diag per session, matching
+  token, duplicate role/token rejected, 10 s handshake timeout, 300 s pending
+  TTL, 1024 pending sessions by default, 1 s control-write timeout.
+- Tunnel: `tokio::io::copy_bidirectional` with `TCP_NODELAY`, graceful
+  cancellation and byte counters in the log.
+- CLI: `--listen` (default `0.0.0.0:13500`), `--handshake-timeout`,
+  `--pending-timeout`, `--max-pending`; `RUST_LOG` controls log level.
+- 12 integration tests in `doip-server/tests/relay.rs` use real loopback TCP and
+  cover forwarding, 1 MiB payloads, isolation, errors and shutdown.
 
 ## Current TUI behavior
 
@@ -296,6 +315,8 @@ source "$HOME/.cargo/env"   # if cargo is not on PATH
 cargo build --workspace
 cargo test --workspace
 cargo test -p doip-protocol
+cargo test -p doip-server
+cargo run -p doip-server -- --listen 127.0.0.1:13500
 cargo run -p doip-client
 cargo run -p doip-client -- --mock   # preview with admin/drivers emulated
 cargo clippy --workspace --all-targets -- -D warnings
@@ -315,6 +336,10 @@ cargo clippy -p doip-client --all-targets --target x86_64-pc-windows-msvc -- -D 
 - Protocol checkpoint (2026-11-25): `cargo test -p doip-protocol -p doip-core`
   — 9 protocol + 17 core tests pass; `cargo clippy -p doip-protocol -p doip-core
   --all-targets -- -D warnings` — clean.
+- Server checkpoint (2026-11-25): `cargo test -p doip-server` — 12 integration
+  tests + 4 CLI tests + 1 config test pass; `cargo test --workspace` all green;
+  `cargo clippy --workspace --all-targets -- -D warnings` clean. Windows target:
+  `cargo check`/`clippy -p doip-server --target x86_64-pc-windows-msvc` clean.
 - `cargo fmt --all --check` and
   `cargo clippy --workspace --all-targets -- -D warnings` — clean.
 - Windows target code: `cargo check`/`clippy` for

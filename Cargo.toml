@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/doip-core", "crates/doip-protocol", "crates/doip-client"]
+members = ["crates/doip-core", "crates/doip-protocol", "crates/doip-server", "crates/doip-client"]
 
 [workspace.package]
 version = "0.1.0"

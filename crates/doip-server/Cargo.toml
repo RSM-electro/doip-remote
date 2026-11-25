@@ -1,0 +1,21 @@
+[package]
+name = "doip-server"
+description = "Plaintext L4 relay server for doip-remote"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+doip-core = { path = "../doip-core" }
+doip-protocol = { path = "../doip-protocol" }
+tokio = { version = "1.54", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+doip-core = { path = "../doip-core" }
+doip-protocol = { path = "../doip-protocol" }
+tokio = { version = "1.54", features = ["full"] }
