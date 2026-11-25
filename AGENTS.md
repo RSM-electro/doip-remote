@@ -106,18 +106,27 @@ and record important architecture decisions as they are made.
   forwarding, 1 MiB payloads, session isolation, wrong token, duplicate role,
   malformed/oversized frames, handshake and pending timeouts, disconnect
   propagation, shutdown and the pending-session cap.
-- **Next Step:** Server checkpoint 3 — deploy `doip-server` to
-  `176.53.237.193` (install rustup/build tools), run it under systemd and
-  smoke-test pairing/forwarding over the public 13500 port. Then integrate the
-  relay into `doip-client` (Car vehicle dial-out, Diag local
-  `127.0.0.1:13400` listener). The remaining Windows 11 checklist items are
-  non-blocking.
+  **Server checkpoint 3 (2026-11-25):** deployed `doip-server` to
+  `176.53.237.193`. Installed Debian `build-essential` + rustup 1.100, built the
+  release binary, installed `/usr/local/bin/doip-server`, created the system user
+  `doip`, and enabled `doip-server.service` (plaintext `0.0.0.0:13500`,
+  `Restart=on-failure`, systemd hardening). A public smoke test from the
+  workstation paired a session, forwarded 27 bytes both ways and rejected a
+  wrong token with `token_mismatch`; the service is `active` and `enabled`.
+  Deployment artifacts: `deploy/doip-server.service`, `deploy/README.md`.
+- **Next Step:** Client checkpoint 1 — integrate the relay into `doip-client`:
+  replace `RELAY_SERVER = "auto"` with a configurable relay address
+  (`176.53.237.193:13500` for now), connect/pair from the Car and Diag actions,
+  dial the vehicle from Car and listen on `127.0.0.1:13400` from Diag, then
+  `copy_bidirectional`. Drive `ConnectionStatus` from real events and keep the
+  existing exit confirmation. After that, run an end-to-end L4 echo test over
+  the public relay. The remaining Windows 11 checklist items are non-blocking.
 - **Repo state:** branch `main`; recent commits include Stage 1-3 UX hardening,
   `feat(ui): add confirmation modal for active session exit`,
   `fix(lifecycle): definitively resolve cleanup crash and implement strict menu blocking`,
   the `panic.log` diagnostics commit, the strict post-cleanup lifecycle fix
   (console isolation, quit fence, hidden-window restoration), and the plaintext
-  relay protocol checkpoint.
+  relay protocol, server and deployment checkpoints.
 
 ## Architecture
 
@@ -160,6 +169,7 @@ doip-remote/
 │           ├── logging.rs     # File + in-memory log layers
 │           ├── net.rs         # Cancellation token, network tasks, shutdown
 │           └── drivers/mod.rs # Npcap/Loopback detection and installation
+├── deploy/           # systemd unit and deployment notes
 ├── .github/workflows/ # CI: build + test on Ubuntu and Windows
 ├── Cargo.toml         # Cargo workspace
 ├── Cargo.lock         # Committed for reproducible application builds
@@ -168,7 +178,7 @@ doip-remote/
 └── README.md
 ```
 
-Next: deploy `doip-server` to the relay host and integrate it into the client.
+Next: integrate the relay into `doip-client`; see the Current Status block.
 
 ## Session code format (implemented)
 
@@ -222,6 +232,8 @@ and `doip-server`.
   cancellation and byte counters in the log.
 - CLI: `--listen` (default `0.0.0.0:13500`), `--handshake-timeout`,
   `--pending-timeout`, `--max-pending`; `RUST_LOG` controls log level.
+- Deployed relay: `176.53.237.193:13500` (plaintext), systemd unit
+  `doip-server.service`, binary `/usr/local/bin/doip-server`, user `doip`.
 - 12 integration tests in `doip-server/tests/relay.rs` use real loopback TCP and
   cover forwarding, 1 MiB payloads, isolation, errors and shutdown.
 
@@ -318,6 +330,8 @@ cargo test -p doip-protocol
 cargo test -p doip-server
 cargo run -p doip-server -- --listen 127.0.0.1:13500
 cargo run -p doip-client
+# deployment (see deploy/README.md)
+rsync -az --exclude target --exclude .git ./ root@176.53.237.193:/opt/doip-remote/src/
 cargo run -p doip-client -- --mock   # preview with admin/drivers emulated
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
@@ -340,6 +354,11 @@ cargo clippy -p doip-client --all-targets --target x86_64-pc-windows-msvc -- -D 
   tests + 4 CLI tests + 1 config test pass; `cargo test --workspace` all green;
   `cargo clippy --workspace --all-targets -- -D warnings` clean. Windows target:
   `cargo check`/`clippy -p doip-server --target x86_64-pc-windows-msvc` clean.
+- Deployment checkpoint (2026-11-25): `doip-server` is `active` and `enabled` on
+  `doip-relay` (`176.53.237.193:13500`). Public smoke test: Car/Diag paired, a
+  27-byte payload round-tripped both ways, and a wrong token returned
+  `token_mismatch`. Journal shows `paired session` and
+  `tunnel closed ... car_to_diag=27 diag_to_car=27`.
 - `cargo fmt --all --check` and
   `cargo clippy --workspace --all-targets -- -D warnings` — clean.
 - Windows target code: `cargo check`/`clippy` for
@@ -395,9 +414,11 @@ cargo clippy -p doip-client --all-targets --target x86_64-pc-windows-msvc -- -D 
 - TUI stack: `ratatui 0.26` + `crossterm 0.27`; logs use `tracing-appender 0.2`.
   `inquire` was removed in stage 1.
 - Relay host: `176.53.237.193` (`root` SSH key already installed), Debian 13,
-  hostname `doip-relay`, 2 vCPU / 3.8 GiB RAM / 3.7 GiB free. `ufw` is active and
-  allows `22/tcp` and `13500/tcp`; nothing listens on 13500 yet. Rust, git and
-  gcc are **not installed** there; `apt` and `rustup` downloads work.
+  hostname `doip-relay`, 2 vCPU / 3.8 GiB RAM / 2.4 GiB free. `ufw` is active and
+  allows `22/tcp` and `13500/tcp`. Rust 1.100 (rustup, minimal profile),
+  `build-essential`, git and rsync are installed. The service runs as the system
+  user `doip` from `/usr/local/bin/doip-server`; source mirror is
+  `/opt/doip-remote/src`.
 - The relay is plaintext-only for now (no TLS, no end-to-end encryption), so it
   is for development/staging. Do not expose real vehicle traffic yet.
 
@@ -466,6 +487,7 @@ Still open:
 1. Read this **Current Status** block and the server checkpoints.
 2. `git log --oneline -5` and `git status` in `doip-remote`.
 3. Run `cargo test --workspace` to confirm the baseline.
-4. Continue with the next server checkpoint in the **Current Status** block:
-   `doip-server` registry/tunnel, then deployment and client integration.
-   The Windows 11 checklist is non-blocking. Update this file, then commit.
+4. Continue with the next client checkpoint in the **Current Status** block:
+   relay integration (Car dial-out, Diag `127.0.0.1:13400` listener), then an
+   end-to-end L4 test over `176.53.237.193:13500`. The Windows 11 checklist is
+   non-blocking. Update this file, then commit.

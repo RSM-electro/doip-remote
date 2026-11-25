@@ -1,0 +1,29 @@
+[Unit]
+Description=doip-remote plaintext relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=doip
+Group=doip
+ExecStart=/usr/local/bin/doip-server --listen 0.0.0.0:13500
+Environment=RUST_LOG=info
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target

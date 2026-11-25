@@ -7,11 +7,11 @@ DoIP (Diagnostics over Internet Protocol, ISO 13400). A vehicle-side agent and a
 diagnostic client exchange a compact, copy-pasteable session code to establish a
 tunnel — no VPN setup and no vendor-specific software required.
 
-> **Status (2026-11-21):** The client uses a full ratatui dashboard: menu, live
-> status panel, scrolling log console and version in the header. Driver
-> installation runs in the background, the Car code is copied from a popup, and
-> cleanup/exit are separate with safe log deletion and graceful network shutdown.
-> Next: Windows 11 validation. Server/relay work is postponed.
+> **Status (2026-11-25):** The client has a full ratatui dashboard, driver
+> management, clipboard session codes and graceful lifecycle handling. The
+> plaintext relay (`doip-server`) is implemented and deployed at
+> `176.53.237.193:13500`. Next: integrate the relay into the client and validate
+> L4 end-to-end. TLS comes after the plaintext path is proven.
 > See [AGENTS.md](AGENTS.md) for the full project context and next steps.
 
 ## Highlights
@@ -23,6 +23,8 @@ tunnel — no VPN setup and no vendor-specific software required.
   status panel, a version label and a scrolling log console.
 - **Windows-ready driver checks** — detects Npcap and the KM-TEST Loopback
   Adapter, and installs them in the background.
+- **Plaintext relay server** — pairs a Car and a Diag by session id/token, then
+  forwards raw DoIP bytes; deployed on a small Linux host.
 - **Single binary client** — no configuration files.
 - **Rust** — memory safety, predictable performance and easy cross-compilation.
 
@@ -32,6 +34,8 @@ tunnel — no VPN setup and no vendor-specific software required.
 doip-remote/
 ├── crates/
 │   ├── doip-core/     # Shared types: session codes, roles, errors
+│   ├── doip-protocol/ # Relay handshake messages and framing
+│   ├── doip-server/   # Plaintext relay server
 │   └── doip-client/   # Interactive terminal client
 │       └── src/
 │           ├── main.rs        # Event loop and menu actions
@@ -40,6 +44,7 @@ doip-remote/
 │           ├── tui.rs         # Terminal setup/restore and key reader
 │           ├── logging.rs     # File + in-memory log routing
 │           └── drivers/       # Driver detection and installation
+├── deploy/            # systemd unit and deployment notes
 ├── .github/workflows/ # CI (Linux + Windows)
 ├── Cargo.toml         # Cargo workspace
 └── rust-toolchain.toml
@@ -118,15 +123,38 @@ Logs are written both to `doip-remote.log` on the user's Desktop
 (`%USERPROFILE%\Desktop`, or `~/Desktop`; the home directory is used if
 `Desktop` does not exist) and to the console. The terminal is always restored
 on exit, on `Ctrl+C` and on panic.
-Networking is still a stub; the session-code generator/parser and the Windows
-driver flow are real. Choosing **Удалить драйверы и логи** closes the file writer
-before deleting the log, so the app keeps running without Windows sharing
-violations and shows the refreshed `[НЕТ]` / `[MISSING]` statuses.
+Networking on the client is still a stub; the session-code generator/parser,
+the Windows driver flow and the relay server are real. Choosing **Удалить
+драйверы и логи** closes the file writer before deleting the log, so the app
+keeps running without Windows sharing violations and shows the refreshed
+`[НЕТ]` / `[MISSING]` statuses.
 
 Every exit path (Finish diagnostics, `Esc`, `q`, `Ctrl+C`) cancels a shared
 `CancellationToken`. `net::NetworkService` waits for its spawned tasks, drops
 listeners so their ports are released, and closes accepted streams with
 `linger(0)` to avoid leftover `TIME_WAIT` sockets.
+
+## Run the relay server
+
+```sh
+# Local development
+cargo run -p doip-server -- --listen 127.0.0.1:13500
+
+# Show all options
+cargo run -p doip-server -- --help
+```
+
+The relay accepts a length-prefixed JSON `Hello` (`session`, `token`, `role`),
+pairs one Car with one Diag, then forwards raw bytes between them. It does not
+parse DoIP. Defaults: 10 s handshake timeout, 300 s pending-session TTL, 1024
+pending sessions, control frames capped at 16 KiB.
+
+The reference deployment runs at `176.53.237.193:13500` under systemd; see
+[`deploy/README.md`](deploy/README.md) for the unit file and update steps.
+
+> **Plaintext only:** the handshake and tunnel are not encrypted yet. Use this
+> for development and staging, not for real vehicle traffic. TLS is the next
+> backend milestone after client integration.
 
 ## Driver checks
 
@@ -183,6 +211,8 @@ terminal output can be pasted back as-is.
 
 ```sh
 cargo test --workspace
+cargo test -p doip-protocol
+cargo test -p doip-server
 ```
 
 ## License
