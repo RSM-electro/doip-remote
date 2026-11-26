@@ -8,7 +8,7 @@ and record important architecture decisions as they are made.
 
 ## Current Status (обновляй этот блок каждый день)
 
-- **Date:** 2026-11-25
+- **Date:** 2026-11-26
 - **Phase:** Plaintext client ↔ relay integration complete. The Car/Diag actions
   now pair through `doip-server` and tunnel raw bytes. TLS/encryption is the next
   backend milestone.
@@ -130,6 +130,15 @@ and record important architecture decisions as they are made.
   `doip-server` + echo vehicle + Car/Diag tasks). The real client binaries were
   also driven through PTYs against both a local relay and the public
   `176.53.237.193:13500`; a 30-byte payload echoed both ways.
+  **Server verification (2026-11-26):** the existing rendezvous relay was
+  re-verified without changes. `cargo build -p doip-server` is clean and the
+  targeted `pairs_and_forwards_bytes_both_ways` integration test passes. A
+  standalone two-client run against `127.0.0.1:15600` with the same session
+  id/token received `waiting` → `paired` on both sockets and exchanged 9 bytes
+  each way; the log showed `paired session` and
+  `tunnel closed ... car_to_diag=9 diag_to_car=9`. The production protocol stays
+  the shared length-prefixed JSON handshake (`doip-protocol`); it was **not**
+  downgraded to first-line `DT1-` + `Arc<Mutex<HashMap>>`.
 - **Next Step:** Backend encryption (TLS/Noise) still deferred by design. Before
   that, consider client hardening: allow a new Diag connection after the first
   one closes (currently one tunnel serves one local DoIP connection), auto-detect
@@ -378,7 +387,7 @@ cargo check -p doip-client --target x86_64-pc-windows-msvc
 cargo clippy -p doip-client --all-targets --target x86_64-pc-windows-msvc -- -D warnings
 ```
 
-## Last verification (2026-11-25)
+## Last verification (2026-11-26)
 
 - `cargo build --release` — OK.
 - `cargo test --workspace` — 29 `doip-client` + 17 `doip-core` tests + 1 doctest,
@@ -407,6 +416,11 @@ cargo clippy -p doip-client --all-targets --target x86_64-pc-windows-msvc -- -D 
   30-byte payload echoed from a local vehicle simulator. Relay journal:
   `paired session ...` and
   `tunnel closed ... car_to_diag=30 diag_to_car=30 elapsed_ms=215`.
+- Server rendezvous re-verification (2026-11-26): `cargo build -p doip-server`
+  clean; `pairs_and_forwards_bytes_both_ways` passes; a standalone script
+  against a local `doip-server` paired two sockets with the same session id and
+  exchanged 9 bytes in each direction (`car_to_diag=9 diag_to_car=9`). No
+  protocol rewrite was needed.
 - `cargo fmt --all --check` and
   `cargo clippy --workspace --all-targets -- -D warnings` — clean.
 - Windows target code: `cargo check`/`clippy` for
