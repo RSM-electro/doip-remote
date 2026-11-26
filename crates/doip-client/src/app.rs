@@ -23,11 +23,9 @@ pub enum Focus {
 pub enum ConnectionStatus {
     /// No tunnel has been established.
     Disconnected,
-    /// A tunnel to the relay is established.
-    ///
-    /// Reserved for the future relay implementation. Nothing constructs it yet:
-    /// the client reports `Disconnected` until the server exists.
-    #[allow(dead_code)]
+    /// The relay session is being negotiated, or a peer/local client is awaited.
+    Connecting,
+    /// The relay tunnel is paired and bytes are being forwarded.
     Connected,
 }
 
@@ -109,6 +107,8 @@ pub struct App {
     pub loopback_status: bool,
     /// Tunnel state shown in the status panel.
     pub connection_status: ConnectionStatus,
+    /// A Car/Diag network session is starting or running.
+    pub session_active: bool,
     /// Shared log buffer, filled by the `tracing` UI layer.
     pub logs: Arc<Mutex<VecDeque<String>>>,
     /// How many lines the log panel is scrolled up from the bottom.
@@ -145,6 +145,7 @@ impl App {
             npcap_status: false,
             loopback_status: false,
             connection_status: ConnectionStatus::Disconnected,
+            session_active: false,
             logs,
             log_scroll: 0,
             diag_input: None,
@@ -215,6 +216,18 @@ impl App {
         self.log_file_exists = exists;
     }
 
+    /// Marks the start of a Car/Diag session before the network task runs.
+    pub fn begin_session(&mut self) {
+        self.session_active = true;
+        self.connection_status = ConnectionStatus::Connecting;
+    }
+
+    /// Marks the end of a session and returns the status to `Disconnected`.
+    pub fn finish_session(&mut self) {
+        self.session_active = false;
+        self.connection_status = ConnectionStatus::Disconnected;
+    }
+
     /// Applies the statuses observed after driver cleanup.
     ///
     /// Cleanup is deliberately non-destructive to the session: this only
@@ -224,7 +237,7 @@ impl App {
     pub fn apply_cleanup_status(&mut self, npcap: bool, loopback: bool, log_exists: bool) {
         self.set_driver_status(npcap, loopback);
         self.set_log_file_exists(log_exists);
-        self.connection_status = ConnectionStatus::Disconnected;
+        self.finish_session();
 
         debug_assert!(
             !self.should_quit,
@@ -335,11 +348,27 @@ mod tests {
     }
 
     #[test]
+    fn sessions_transition_through_connecting() {
+        let mut app = app();
+
+        app.begin_session();
+        assert!(app.session_active);
+        assert_eq!(app.connection_status, ConnectionStatus::Connecting);
+
+        app.connection_status = ConnectionStatus::Connected;
+        app.finish_session();
+
+        assert!(!app.session_active);
+        assert_eq!(app.connection_status, ConnectionStatus::Disconnected);
+    }
+
+    #[test]
     fn cleanup_status_refresh_does_not_quit_the_app() {
         let mut app = app();
         app.set_driver_status(true, true);
         app.set_log_file_exists(true);
         app.connection_status = ConnectionStatus::Connected;
+        app.session_active = true;
         app.show_confirm_delete = true;
 
         app.apply_cleanup_status(false, false, false);
@@ -348,6 +377,7 @@ mod tests {
         assert!(!app.loopback_status);
         assert!(!app.log_file_exists);
         assert_eq!(app.connection_status, ConnectionStatus::Disconnected);
+        assert!(!app.session_active);
         assert!(!app.should_quit, "cleanup must keep the event loop alive");
         assert!(
             app.show_confirm_delete,

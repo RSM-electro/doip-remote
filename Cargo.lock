@@ -265,6 +265,8 @@ dependencies = [
  "colored",
  "crossterm",
  "doip-core",
+ "doip-protocol",
+ "doip-server",
  "embed-resource",
  "image",
  "ratatui",

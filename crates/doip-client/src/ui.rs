@@ -206,6 +206,14 @@ fn draw_statuses(frame: &mut Frame, area: Rect, app: &App) {
                 .add_modifier(Modifier::BOLD),
             width,
         ),
+        ConnectionStatus::Connecting => status_line(
+            "Connection",
+            "[CONNECTING]",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+            width,
+        ),
         ConnectionStatus::Disconnected => status_line(
             "Connection",
             "[DISCONNECTED]",

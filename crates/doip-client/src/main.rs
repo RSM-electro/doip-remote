@@ -13,23 +13,110 @@ mod ui;
 
 use std::{
     collections::VecDeque,
-    io,
+    env, io,
+    net::SocketAddr,
     process::ExitCode,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
-use app::{App, Focus, MenuItem};
+use app::{App, ConnectionStatus, Focus, MenuItem};
 use colored::Colorize;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use doip_core::{Role, SessionCode};
+use doip_core::{Role, SessionCode, DEFAULT_DOIP_PORT};
 use drivers::InstallEvent;
+use net::{NetEvent, NetworkService};
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-/// Placeholder relay address until the networking layer is implemented.
-const RELAY_SERVER: &str = "auto";
+/// Deployed plaintext relay used when `--relay` is not given.
+const DEFAULT_RELAY_SERVER: &str = "176.53.237.193:13500";
+
+/// Vehicle target used when `--vehicle` is not given (development default).
+const DEFAULT_VEHICLE_TARGET: &str = "127.0.0.1";
+
+/// Command-line help.
+const HELP: &str = "\
+doip-client — remote DoIP tunnel
+
+Usage: doip-client [OPTIONS]
+
+Options:
+  --relay <ADDR>           Relay server address [default: 176.53.237.193:13500]
+  --vehicle <HOST[:PORT]>  Vehicle target for Car mode [default: 127.0.0.1:13400]
+  --diag-listen <ADDR>     Local listener for Diag mode [default: 127.0.0.1:13400]
+  --mock                   Preview the dashboard without drivers
+  -h, --help               Print help
+  -V, --version            Print version";
+
+/// Runtime options shared by the menu actions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClientConfig {
+    relay: String,
+    vehicle: Option<String>,
+    diag_listen: Option<SocketAddr>,
+    mock: bool,
+}
+
+impl Default for ClientConfig {
+    fn default() -> Self {
+        Self {
+            relay: DEFAULT_RELAY_SERVER.to_owned(),
+            vehicle: None,
+            diag_listen: None,
+            mock: false,
+        }
+    }
+}
+
+impl ClientConfig {
+    /// Applies `DOIP_*` environment variables on top of the defaults.
+    fn from_env() -> Self {
+        let mut config = Self::default();
+
+        if let Ok(relay) = env::var("DOIP_RELAY") {
+            config.relay = relay;
+        }
+        if let Ok(vehicle) = env::var("DOIP_VEHICLE") {
+            config.vehicle = Some(vehicle);
+        }
+        if let Ok(listen) = env::var("DOIP_DIAG_LISTEN") {
+            match listen.parse() {
+                Ok(address) => config.diag_listen = Some(address),
+                Err(_) => warn!("Ignoring invalid DOIP_DIAG_LISTEN={listen}"),
+            }
+        }
+
+        config
+    }
+
+    /// Vehicle host and port used by Car mode.
+    fn vehicle_target(&self) -> (String, u16) {
+        let raw = self
+            .vehicle
+            .as_deref()
+            .unwrap_or(DEFAULT_VEHICLE_TARGET)
+            .trim();
+
+        parse_host_port(raw)
+            .unwrap_or_else(|| (DEFAULT_VEHICLE_TARGET.to_owned(), DEFAULT_DOIP_PORT))
+    }
+}
+
+/// Splits `host[:port]`, accepting plain hosts and IPv4/IPv6 literals.
+fn parse_host_port(value: &str) -> Option<(String, u16)> {
+    if let Ok(address) = value.parse::<SocketAddr>() {
+        return Some((address.ip().to_string(), address.port()));
+    }
+
+    let (host, port) = value.rsplit_once(':')?;
+    if host.is_empty() || host.contains(':') {
+        return None;
+    }
+
+    Some((host.to_owned(), port.parse().ok()?))
+}
 
 fn cleanup_trace(message: &str) {
     use std::io::Write;
@@ -113,10 +200,67 @@ fn install_panic_log_hook() {
     }));
 }
 
+/// Parses command-line arguments. Returns `Ok(None)` for `--help`/`--version`.
+fn parse_config(
+    mut args: impl Iterator<Item = String>,
+    mut config: ClientConfig,
+) -> Result<Option<ClientConfig>, String> {
+    while let Some(argument) = args.next() {
+        match argument.as_str() {
+            "--mock" => config.mock = true,
+            "--relay" => {
+                config.relay = take_value(&mut args, "--relay")?;
+                if config.relay.trim().is_empty() {
+                    return Err("--relay must not be empty".to_owned());
+                }
+            }
+            "--vehicle" => {
+                let value = take_value(&mut args, "--vehicle")?;
+                if value.trim().is_empty() {
+                    return Err("--vehicle must not be empty".to_owned());
+                }
+                config.vehicle = Some(value);
+            }
+            "--diag-listen" => {
+                let value = take_value(&mut args, "--diag-listen")?;
+                config.diag_listen = Some(value.parse().map_err(|_| {
+                    format!("invalid --diag-listen address `{value}`; expected IP:PORT")
+                })?);
+            }
+            "--help" | "-h" => {
+                println!("{HELP}");
+                return Ok(None);
+            }
+            "--version" | "-V" => {
+                println!("doip-client {}", env!("CARGO_PKG_VERSION"));
+                return Ok(None);
+            }
+            other => return Err(format!("unknown argument `{other}`")),
+        }
+    }
+
+    Ok(Some(config))
+}
+
+fn take_value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, String> {
+    args.next()
+        .ok_or_else(|| format!("{flag} requires a value"))
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     install_panic_log_hook();
-    let mock = std::env::args().skip(1).any(|arg| arg == "--mock");
+
+    let config = match parse_config(env::args().skip(1), ClientConfig::from_env()) {
+        Ok(Some(config)) => config,
+        Ok(None) => return ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("doip-client: {error}\n\n{HELP}");
+            return ExitCode::from(2);
+        }
+    };
+
+    let mock = config.mock;
 
     let logs = Arc::new(Mutex::new(VecDeque::new()));
     let mut logger = logging::init(Arc::clone(&logs));
@@ -133,7 +277,7 @@ async fn main() -> ExitCode {
         status.is_all_ok()
     };
 
-    log_startup_status(&app, drivers_ok);
+    log_startup_status(&app, drivers_ok, &config);
     app.set_log_file_exists(logging::log_file_path().is_file());
 
     let mut terminal = match tui::init() {
@@ -145,9 +289,19 @@ async fn main() -> ExitCode {
     };
 
     let cancellation = CancellationToken::new();
-    let network = net::NetworkService::start(cancellation.clone(), None);
+    let (net_tx, mut net_rx) = tokio_mpsc::unbounded_channel();
+    let mut network = NetworkService::new(cancellation.clone(), net_tx);
 
-    let result = run(&mut terminal, &mut app, &mut logger, &cancellation).await;
+    let result = run(
+        &mut terminal,
+        &mut app,
+        &mut logger,
+        &cancellation,
+        &mut network,
+        &mut net_rx,
+        &config,
+    )
+    .await;
     tui::restore();
 
     // Any exit path cancels the network tasks; shutdown waits for the tasks and
@@ -179,11 +333,12 @@ async fn main() -> ExitCode {
     }
 }
 
-fn log_startup_status(app: &App, drivers_ok: bool) {
+fn log_startup_status(app: &App, drivers_ok: bool, config: &ClientConfig) {
     info!(
         "Logging started, file: {}",
         logging::log_file_path().display()
     );
+    info!("Relay server: {}", config.relay);
 
     if app.admin_status {
         info!("[OK] Administrator rights available.");
@@ -211,6 +366,9 @@ async fn run(
     app: &mut App,
     logger: &mut Option<logging::Logger>,
     cancellation: &CancellationToken,
+    network: &mut NetworkService,
+    net_rx: &mut tokio_mpsc::UnboundedReceiver<NetEvent>,
+    config: &ClientConfig,
 ) -> io::Result<()> {
     let keys = tui::spawn_key_reader();
     let (install_tx, mut install_rx) = tokio_mpsc::unbounded_channel();
@@ -221,11 +379,15 @@ async fn run(
         terminal.draw(|frame| ui::draw(frame, app))?;
 
         while let Ok(key) = keys.try_recv() {
-            handle_key(app, key, &install_tx, logger, cancellation);
+            handle_key(app, key, &install_tx, logger, cancellation, network, config);
         }
 
         while let Ok(event) = install_rx.try_recv() {
             handle_install_event(app, event);
+        }
+
+        while let Ok(event) = net_rx.try_recv() {
+            handle_net_event(app, event);
         }
 
         if !was_cleaned_up && app.is_cleaned_up {
@@ -277,6 +439,8 @@ fn handle_key(
     install_tx: &tokio_mpsc::UnboundedSender<InstallEvent>,
     logger: &mut Option<logging::Logger>,
     cancellation: &CancellationToken,
+    network: &mut NetworkService,
+    config: &ClientConfig,
 ) {
     // Ctrl+C must work in every mode, including the modals.
     if key.modifiers.contains(KeyModifiers::CONTROL)
@@ -351,7 +515,7 @@ fn handle_key(
             }
             KeyCode::Enter => {
                 if let Some(code) = app.diag_input.take() {
-                    accept_diag_code(&code);
+                    accept_diag_code(app, network, config, &code);
                 }
             }
             KeyCode::Backspace => {
@@ -382,7 +546,7 @@ fn handle_key(
                         .iter()
                         .position(|candidate| *candidate == item)
                         .unwrap_or(app.menu_index);
-                    activate(app, install_tx, cancellation);
+                    activate(app, install_tx, cancellation, network, config);
                 }
             }
             return;
@@ -416,7 +580,7 @@ fn handle_key(
                 } else if app.is_installing {
                     warn!("Wait for driver installation to finish.");
                 } else {
-                    activate(app, install_tx, cancellation);
+                    activate(app, install_tx, cancellation, network, config);
                 }
             }
         }
@@ -442,7 +606,7 @@ fn request_exit(app: &mut App, cancellation: &CancellationToken) {
         return;
     }
 
-    if app.connection_status == app::ConnectionStatus::Connected {
+    if app.session_active || app.connection_status == ConnectionStatus::Connected {
         app.show_confirm_exit = true;
         return;
     }
@@ -460,10 +624,12 @@ fn activate(
     app: &mut App,
     install_tx: &tokio_mpsc::UnboundedSender<InstallEvent>,
     cancellation: &CancellationToken,
+    network: &mut NetworkService,
+    config: &ClientConfig,
 ) {
     match app.selected() {
         MenuItem::Install => begin_install(app, install_tx),
-        MenuItem::Car => begin_car(app),
+        MenuItem::Car => begin_car(app, network, config),
         MenuItem::Diag => {
             app.diag_input = Some(String::new());
             info!("Enter the DT1-... session code:");
@@ -527,15 +693,51 @@ fn handle_install_event(app: &mut App, event: InstallEvent) {
     }
 }
 
-fn begin_car(app: &mut App) {
-    let session = SessionCode::new(Role::Car, RELAY_SERVER, None);
+fn handle_net_event(app: &mut App, event: NetEvent) {
+    match event {
+        NetEvent::Status(status) => app.connection_status = status,
+        NetEvent::Finished => {
+            if app.session_active {
+                info!("Session finished. The tunnel is closed.");
+            }
+            app.finish_session();
+        }
+    }
+}
+
+fn begin_car(app: &mut App, network: &mut NetworkService, config: &ClientConfig) {
+    if !start_allowed(app) {
+        return;
+    }
+
+    let (vehicle_host, vehicle_port) = config.vehicle_target();
+    let mut session = SessionCode::new(Role::Car, config.relay.clone(), Some(vehicle_host.clone()));
+    session.doip_port = vehicle_port;
+
     let code = session.generate();
 
     info!("Car session created. Share this code with the diagnostician:");
     info!("{code}");
-    info!("Waiting for server connection (stub)...");
+    info!(
+        "Relay: {} | Vehicle target: {}",
+        session.server,
+        format_target(&vehicle_host, vehicle_port)
+    );
+    info!("Waiting for the diagnostician...");
 
+    app.begin_session();
     app.set_session_code(code);
+    network.start_car(session);
+}
+
+/// Rejects a second session while one is already starting or running.
+fn start_allowed(app: &App) -> bool {
+    if app.session_active {
+        warn!("A session is already active. Exit or clean up before starting another.");
+        return false;
+    }
+
+    true
 }
 
 /// Copies the generated session code to the system clipboard.
@@ -549,17 +751,41 @@ fn copy_session_code(code: &str) {
     }
 }
 
-fn accept_diag_code(input: &str) {
+fn accept_diag_code(
+    app: &mut App,
+    network: &mut NetworkService,
+    config: &ClientConfig,
+    input: &str,
+) {
+    if !start_allowed(app) {
+        return;
+    }
+
     match SessionCode::parse(input) {
         Ok(session) => {
-            info!("[OK] Code accepted. Server: {}", session.server);
+            let listen = config
+                .diag_listen
+                .unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], DEFAULT_DOIP_PORT)));
+
+            info!("[OK] Code accepted. Relay: {}", session.server);
             info!(
-                "Target vehicle IP: {:?}, DoIP port: {}",
-                session.vehicle_ip, session.doip_port
+                "Session {} | DoIP port: {}",
+                session.session_id, session.doip_port
             );
-            info!("Waiting for connection...");
+            info!("Local listener: {listen}");
+
+            app.begin_session();
+            network.start_diag(session, listen);
         }
         Err(error) => error!("Failed to parse code: {error}"),
+    }
+}
+
+fn format_target(host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
     }
 }
 
@@ -616,7 +842,7 @@ fn cleanup_sequence(
     // Step 1: disconnect active sockets.
     cleanup_trace("[INFO] Step 1: cancel CancellationToken");
     cancellation.cancel();
-    app.connection_status = app::ConnectionStatus::Disconnected;
+    app.finish_session();
     info!("[OK] Disconnect requested (CancellationToken triggered).");
 
     // Step 2: remove Npcap and Loopback.
@@ -678,5 +904,95 @@ fn ready_tag(ready: bool) -> &'static str {
         "[OK]"
     } else {
         "[MISSING]"
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    fn args(values: &[&str]) -> impl Iterator<Item = String> {
+        values
+            .iter()
+            .map(|value| (*value).to_owned())
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    #[test]
+    fn defaults_target_the_deployed_relay_and_loopback_vehicle() {
+        let config = parse_config(args(&[]), ClientConfig::default())
+            .unwrap()
+            .expect("config");
+
+        assert_eq!(config.relay, DEFAULT_RELAY_SERVER);
+        assert_eq!(config.vehicle, None);
+        assert_eq!(config.diag_listen, None);
+        assert!(!config.mock);
+        assert_eq!(config.vehicle_target(), ("127.0.0.1".to_owned(), 13400));
+    }
+
+    #[test]
+    fn flags_override_defaults() {
+        let config = parse_config(
+            args(&[
+                "--mock",
+                "--relay",
+                "127.0.0.1:15000",
+                "--vehicle",
+                "10.0.0.5:13401",
+                "--diag-listen",
+                "127.0.0.1:13400",
+            ]),
+            ClientConfig::default(),
+        )
+        .unwrap()
+        .expect("config");
+
+        assert!(config.mock);
+        assert_eq!(config.relay, "127.0.0.1:15000");
+        assert_eq!(config.vehicle.as_deref(), Some("10.0.0.5:13401"));
+        assert_eq!(
+            config.diag_listen,
+            Some(SocketAddr::from(([127, 0, 0, 1], 13400)))
+        );
+        assert_eq!(config.vehicle_target(), ("10.0.0.5".to_owned(), 13401));
+    }
+
+    #[test]
+    fn invalid_arguments_are_rejected() {
+        assert!(parse_config(args(&["--relay"]), ClientConfig::default()).is_err());
+        assert!(parse_config(args(&["--relay", " "]), ClientConfig::default()).is_err());
+        assert!(parse_config(args(&["--vehicle"]), ClientConfig::default()).is_err());
+        assert!(parse_config(
+            args(&["--diag-listen", "localhost"]),
+            ClientConfig::default()
+        )
+        .is_err());
+        assert!(parse_config(args(&["--unknown"]), ClientConfig::default()).is_err());
+    }
+
+    #[test]
+    fn help_and_version_stop_parsing() {
+        assert!(parse_config(args(&["--help"]), ClientConfig::default())
+            .unwrap()
+            .is_none());
+        assert!(parse_config(args(&["-V"]), ClientConfig::default())
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn host_port_parser_accepts_sockets_and_plain_hosts() {
+        assert_eq!(
+            parse_host_port("10.1.2.3:15000"),
+            Some(("10.1.2.3".to_owned(), 15000))
+        );
+        assert_eq!(
+            parse_host_port("[::1]:13400"),
+            Some(("::1".to_owned(), 13400))
+        );
+        assert_eq!(parse_host_port("127.0.0.1"), None);
+        assert_eq!(parse_host_port("vehicle.local:not-a-port"), None);
     }
 }

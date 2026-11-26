@@ -8,15 +8,16 @@ and record important architecture decisions as they are made.
 
 ## Current Status (обновляй этот блок каждый день)
 
-- **Date:** 2026-11-24
-- **Phase:** Client UX finalization (English localization, hotkeys, UAC, cleanup
-  hardening) before moving to the network layer.
+- **Date:** 2026-11-25
+- **Phase:** Plaintext client ↔ relay integration complete. The Car/Diag actions
+  now pair through `doip-server` and tunnel raw bytes. TLS/encryption is the next
+  backend milestone.
 - **Done:** Stage 6/6 — `--mock` mode and final verification. The client is now a
   ratatui dashboard with a menu, dot-aligned status panel, scrolling log console,
   background driver installation, UAC gate and a cleanup modal. `inquire` is gone.
   Follow-up: the key-hint row is now readable (bold yellow keys, cyan actions),
   and `--mock` no longer fakes the connection: the status stays `Disconnected`
-  (`[ОТКЛЮЧЕНО]`) until the relay server exists.
+  until a real relay session starts.
   UI polish: white bold header, strictly red `[MISSING]`/`[DISCONNECTED]`
   statuses, a `Log File` status row, a bold red `[!]` admin warning marker, and
   a green session-code popup after the Car action.
@@ -114,31 +115,49 @@ and record important architecture decisions as they are made.
   workstation paired a session, forwarded 27 bytes both ways and rejected a
   wrong token with `token_mismatch`; the service is `active` and `enabled`.
   Deployment artifacts: `deploy/doip-server.service`, `deploy/README.md`.
-- **Next Step:** Client checkpoint 1 — integrate the relay into `doip-client`:
-  replace `RELAY_SERVER = "auto"` with a configurable relay address
-  (`176.53.237.193:13500` for now), connect/pair from the Car and Diag actions,
-  dial the vehicle from Car and listen on `127.0.0.1:13400` from Diag, then
-  `copy_bidirectional`. Drive `ConnectionStatus` from real events and keep the
-  existing exit confirmation. After that, run an end-to-end L4 echo test over
-  the public relay. The remaining Windows 11 checklist items are non-blocking.
+  **Client checkpoint 1 (2026-11-25):** integrated the relay into `doip-client`.
+  `net::NetworkService` now owns real Car/Diag tasks: both connect to the relay
+  with the v1 handshake, wait for `Waiting` → `Paired`, and then bridge raw bytes
+  with `copy_bidirectional`. Car dials `vehicle_ip:doip_port` (default
+  `127.0.0.1:13400`, `--vehicle`/`DOIP_VEHICLE`); Diag binds a local listener
+  (default `127.0.0.1:13400`, `--diag-listen`/`DOIP_DIAG_LISTEN`) before pairing
+  and serves the first local diagnostic connection. Relay defaults to
+  `176.53.237.193:13500` (`--relay`/`DOIP_RELAY`); `--help`/`--version` were
+  added. `ConnectionStatus` gained `Connecting` (`[CONNECTING]`, yellow) and the
+  exit confirmation now triggers on any active session, not only `Connected`.
+  Network tasks report status/end events to the UI loop; cleanup and exit cancel
+  them. 42 client tests pass, including a loopback end-to-end test (real
+  `doip-server` + echo vehicle + Car/Diag tasks). The real client binaries were
+  also driven through PTYs against both a local relay and the public
+  `176.53.237.193:13500`; a 30-byte payload echoed both ways.
+- **Next Step:** Backend encryption (TLS/Noise) still deferred by design. Before
+  that, consider client hardening: allow a new Diag connection after the first
+  one closes (currently one tunnel serves one local DoIP connection), auto-detect
+  the vehicle IP/loopback adapter, and surface session identifiers in the UI.
+  Then TLS at the relay, followed by X25519 + ChaCha20-Poly1305 as decided.
+  The remaining Windows 11 checklist items are non-blocking.
 - **Repo state:** branch `main`; recent commits include Stage 1-3 UX hardening,
   `feat(ui): add confirmation modal for active session exit`,
   `fix(lifecycle): definitively resolve cleanup crash and implement strict menu blocking`,
   the `panic.log` diagnostics commit, the strict post-cleanup lifecycle fix
-  (console isolation, quit fence, hidden-window restoration), and the plaintext
-  relay protocol, server and deployment checkpoints.
+  (console isolation, quit fence, hidden-window restoration), the plaintext
+  relay protocol, server and deployment checkpoints, and client relay
+  integration.
 
 ## Architecture
 
-- **Current focus:** the plaintext relay backend (`doip-server`). The client
-  interface and Windows driver management are complete enough for backend work;
-  client relay integration follows after the server checkpoint.
+- **Current focus:** plaintext L4 tunnel works end-to-end. The next backend
+  milestone is transport security (TLS at the relay) and then end-to-end
+  encryption; client UX hardening continues alongside.
 - **Topology:** `Car (Windows) <-> Relay Server (Linux) <-> Diag (Windows)`.
-- **Data path (planned):** the car-side agent tunnels DoIP traffic to the relay;
-  the diagnostic client joins the same session using a `DT1-...` session code.
-- **L2/L4:** both are planned. **L4 (proxy) comes first**, then **L2**
-  (Npcap + KM-TEST Loopback) on Windows. The client now checks and installs the
-  L2 driver prerequisites; packet capture itself is not implemented yet.
+- **Data path (implemented):** the Car connects to the relay, waits for the
+  Diag, then dials the vehicle and forwards raw bytes. The Diag connects to the
+  same session using a `DT1-...` code, listens on `127.0.0.1:13400` and forwards
+  the first local diagnostic connection. One relay session serves one DoIP TCP
+  connection.
+- **L2/L4:** **L4 (proxy) is implemented**. **L2** (Npcap + KM-TEST Loopback) on
+  Windows is still planned; the client checks and installs the prerequisites but
+  does not capture packets yet.
 - **Crypto (planned):** X25519 key agreement + ChaCha20-Poly1305 AEAD. Not
   implemented yet; `token` and `key` in session codes are currently random
   placeholders, not negotiated secrets.
@@ -146,8 +165,8 @@ and record important architecture decisions as they are made.
 - **Shutdown:** a `tokio_util::sync::CancellationToken`, owned by
   `net::NetworkService` together with a `JoinSet`, stops every network task.
   Finish diagnostics, `Esc`, `q` and `Ctrl+C` cancel the token; shutdown waits up
-  to 3 s, aborts stragglers, drops listeners (releasing their ports) and closes
-  accepted streams with `linger(0)` so nothing lingers in `TIME_WAIT`.
+  to 3 s, aborts stragglers, drops listeners (releasing their ports) and shuts
+  down accepted streams.
 - **Roles:** `Car` (agent next to the vehicle) and `Diag` (remote technician).
 
 ## Workspace layout
@@ -203,13 +222,16 @@ Next: integrate the relay into `doip-client`; see the Current Status block.
 - Parser ignores whitespace anywhere, so codes pasted from wrapped terminal
   output work. Missing `l`/`p`/`v` use defaults. Required fields must be
   non-empty; port `0` is rejected.
-- The client uses `server = "auto"` as a placeholder until the relay address is
-  agreed.
+- The Car puts the relay address into `server` (`--relay`, default
+  `176.53.237.193:13500`); the Diag parses it from the code. The `role` field
+  records the creator (Car), so the Diag still claims `diag` in its own `Hello`.
+- The Diag listener defaults to `127.0.0.1:13400`; `doip_port` in the code is the
+  **vehicle** port used by the Car, not the local listener.
 
 ## Relay protocol (plaintext, v1)
 
-Implemented in `crates/doip-protocol`; shared by the future client integration
-and `doip-server`.
+Implemented in `crates/doip-protocol`; shared by `doip-client` and
+`doip-server`.
 
 - Handshake only: `u32` big-endian length + compact JSON. Maximum frame 16 KiB.
   The body is read only after the length check, so oversized frames are rejected
@@ -236,6 +258,13 @@ and `doip-server`.
   `doip-server.service`, binary `/usr/local/bin/doip-server`, user `doip`.
 - 12 integration tests in `doip-server/tests/relay.rs` use real loopback TCP and
   cover forwarding, 1 MiB payloads, isolation, errors and shutdown.
+- Client rules (`crates/doip-client/src/net.rs`): connect timeout 10 s, pairing
+  wait 330 s (server expires at 300 s), vehicle dial timeout 10 s, local listener
+  binds before pairing. The Car dials the vehicle after `Paired`; the Diag serves
+  one local connection per session. Status events: `Connecting` → `Connected` →
+  `Disconnected`; task completion sends `NetEvent::Finished`.
+- Client CLI: `--relay`, `--vehicle`, `--diag-listen`, `--mock`; matching
+  `DOIP_RELAY`, `DOIP_VEHICLE`, `DOIP_DIAG_LISTEN` environment variables.
 
 ## Current TUI behavior
 
@@ -255,8 +284,8 @@ and `doip-server`.
 - **Status panel:** `Admin Rights`, `Npcap` and `Loopback` (green `[OK]` / red
   `[MISSING]` — a missing value is **never** green), `Log File` (green `[EXISTS]`
   / red `[MISSING]`, based on `doip-remote.log`), and `Connection` (red
-  `[DISCONNECTED]` / green `[CONNECTED ✓]`). The connection is always
-  `Disconnected` until the relay exists.
+  `[DISCONNECTED]`, yellow `[CONNECTING]` while pairing/waiting, green
+  `[CONNECTED ✓]` while bytes flow).
 - **Menu:** `1. Install Drivers` / `2. I am near the car (Car)` /
   `3. I am a diagnostician (Diag)` / `4. Uninstall drivers and logs` (red) /
   `5. Exit`.
@@ -287,11 +316,15 @@ and `doip-server`.
   SetupAPI HRESULT are logged. The menu is locked meanwhile and statuses refresh
   afterwards. Without admin rights the action only logs an instruction to
   restart as Administrator.
-- **Car:** generates a `DT1-...` code (server `"auto"`), logs it and opens a
-  popup where the code is rendered in green. `Enter` copies it to the system
-  clipboard and logs `[INFO] Code copied to clipboard!`; `Esc` closes the popup.
-- **Diag:** opens a popup; typed/pasted code is parsed on `Enter`, and the
-  target IP, DoIP port and relay server are logged.
+- **Car:** generates a `DT1-...` code with the configured relay address,
+  immediately starts the Car network session (relay pairing, vehicle dial-out,
+  bridge), logs the code and opens a popup where it is rendered in green. `Enter`
+  copies it to the system clipboard and logs `[INFO] Code copied to clipboard!`;
+  `Esc` closes the popup. A second session is refused while one is active.
+- **Diag:** opens a popup; typed/pasted code is parsed on `Enter`. The relay
+  address comes from the code; the client starts the Diag session, which binds
+  `127.0.0.1:13400` (or `--diag-listen`) before pairing and serves the first
+  local diagnostic connection.
 - **Uninstall drivers and logs:** opens a confirmation popup (`Enter` confirms,
   `Esc` cancels; `Esc` only closes the modal). Confirmed cleanup is panic-safe
   (`catch_unwind`) and never exits/quits. Sequence: (1) cancel `CancellationToken`
@@ -306,18 +339,19 @@ and `doip-server`.
   `Loopback [MISSING]` / `Log File [MISSING]` / `Connection [DISCONNECTED]`.
   Later tracing calls continue through the in-memory UI layer and a kept-alive
   no-op file writer.
-- **Exit:** if `ConnectionStatus::Connected`, shows a confirmation modal
-  `[!] Active session. Disconnect and exit? (Enter/Esc)`; `Enter` cancels the
-  network token, shuts down sockets, and exits, `Esc` cancels. If disconnected,
-  exits immediately. After cleanup only `5. Exit` or `Ctrl+C` exits; `Esc`/`q`
-  are ignored. All exit paths cancel the network token and wait for socket
-  shutdown before process end.
+- **Exit:** if a session is starting or connected (`session_active`), shows a
+  confirmation modal `[!] Active session. Disconnect and exit? (Enter/Esc)`;
+  `Enter` cancels the network token, shuts down sockets, and exits, `Esc`
+  cancels. If disconnected, exits immediately. After cleanup only `5. Exit` or
+  `Ctrl+C` exits; `Esc`/`q` are ignored. All exit paths cancel the network token
+  and wait for socket shutdown before process end.
 - **`--mock`:** forces admin rights and both driver statuses green so the
   dashboard can be previewed on Linux. The network status is deliberately not
-  faked and stays red `[ОТКЛЮЧЕНО]` until the server exists.
-- Networking is a **stub**; driver detection, Npcap installation/uninstallation
-  and Loopback creation are real only on Windows. Loopback creation was
-  runtime-tested on Windows 11; the other Windows paths were compile-checked.
+  faked; it only turns green for a real session.
+- Networking is **real** on all platforms (the relay is plaintext); driver
+  detection, Npcap installation/uninstallation and Loopback creation are real
+  only on Windows. Loopback creation was runtime-tested on Windows 11; the other
+  Windows paths were compile-checked.
 
 ## Commands
 
@@ -329,7 +363,9 @@ cargo test --workspace
 cargo test -p doip-protocol
 cargo test -p doip-server
 cargo run -p doip-server -- --listen 127.0.0.1:13500
-cargo run -p doip-client
+cargo run -p doip-client -- --help
+cargo run -p doip-client -- --relay 127.0.0.1:13500 --vehicle 127.0.0.1:13400
+cargo run -p doip-client -- --relay 127.0.0.1:13500   # Diag mode (menu 3)
 # deployment (see deploy/README.md)
 rsync -az --exclude target --exclude .git ./ root@176.53.237.193:/opt/doip-remote/src/
 cargo run -p doip-client -- --mock   # preview with admin/drivers emulated
@@ -342,7 +378,7 @@ cargo check -p doip-client --target x86_64-pc-windows-msvc
 cargo clippy -p doip-client --all-targets --target x86_64-pc-windows-msvc -- -D warnings
 ```
 
-## Last verification (2026-11-23)
+## Last verification (2026-11-25)
 
 - `cargo build --release` — OK.
 - `cargo test --workspace` — 29 `doip-client` + 17 `doip-core` tests + 1 doctest,
@@ -359,6 +395,18 @@ cargo clippy -p doip-client --all-targets --target x86_64-pc-windows-msvc -- -D 
   27-byte payload round-tripped both ways, and a wrong token returned
   `token_mismatch`. Journal shows `paired session` and
   `tunnel closed ... car_to_diag=27 diag_to_car=27`.
+- Client checkpoint (2026-11-25): `cargo test -p doip-client` — 42 tests pass,
+  including `net::tests::car_and_diag_forward_bytes_through_the_relay`, which
+  runs real Car/Diag tasks against a loopback `doip-server` and an echo vehicle.
+  `cargo test --workspace` all green; `cargo clippy --workspace --all-targets --
+  -D warnings` and `cargo fmt --all --check` clean. Windows target
+  `cargo check`/`clippy -p doip-client --target x86_64-pc-windows-msvc` clean
+  (only the expected `llvm-rc` warning).
+- Public client E2E (2026-11-25): both real `doip-client` binaries were driven
+  through PTYs (Car menu 2, Diag menu 3) against `176.53.237.193:13500`; a
+  30-byte payload echoed from a local vehicle simulator. Relay journal:
+  `paired session ...` and
+  `tunnel closed ... car_to_diag=30 diag_to_car=30 elapsed_ms=215`.
 - `cargo fmt --all --check` and
   `cargo clippy --workspace --all-targets -- -D warnings` — clean.
 - Windows target code: `cargo check`/`clippy` for
@@ -465,7 +513,8 @@ the client and its driver flow on real Windows 11:
 - [ ] Test failure paths: declined UAC, canceled Npcap wizard, missing
       `netloop.inf`, download error, cleanup `Y/N` and log deletion.
 - [ ] Confirm Ctrl+C and window close restore the console (no broken prompt).
-- [ ] Only after this is green, resume `doip-server` work.
+- [ ] Validate the Car/Diag relay flow on real Windows 11 (driver checks,
+      `127.0.0.1:13400` listener, clipboard code, Ctrl+C shutdown).
 
 ## Relay design decisions
 
@@ -475,19 +524,21 @@ Still open:
       after pairing.
 - [x] Handshake/authentication: `session_id` + `token`, one Car and one Diag per
       session, duplicate role and token mismatch rejected.
-- [ ] Pending-session expiry, reconnect behavior and rate limiting details.
-- [ ] How the relay address (`server` field) is configured; replace `"auto"`.
+- [x] Pending-session expiry (300 s TTL) and a pending-session cap (1024).
+      Reconnect/rate-limit policy is still open.
+- [x] Relay address configuration: `--relay`/`DOIP_RELAY` (default
+      `176.53.237.193:13500`), embedded in the session code by the Car.
 - [ ] TLS termination at the relay and certificate strategy.
 - [ ] Where X25519 + ChaCha20-Poly1305 fits: end-to-end or relay-terminated?
-- [ ] L4 proxy semantics, port mapping and DoIP payload transparency.
+- [x] L4 proxy semantics: one relay session per DoIP TCP connection; raw bytes,
+      no DoIP parsing, Diag local listener on 13400.
 - [ ] L2 data path later: Npcap capture + KM-TEST Loopback integration.
 
 ## How to resume
 
-1. Read this **Current Status** block and the server checkpoints.
+1. Read this **Current Status** block and the server/client checkpoints.
 2. `git log --oneline -5` and `git status` in `doip-remote`.
 3. Run `cargo test --workspace` to confirm the baseline.
-4. Continue with the next client checkpoint in the **Current Status** block:
-   relay integration (Car dial-out, Diag `127.0.0.1:13400` listener), then an
-   end-to-end L4 test over `176.53.237.193:13500`. The Windows 11 checklist is
-   non-blocking. Update this file, then commit.
+4. Continue with the next milestone in the **Current Status** block (TLS and
+   encryption, or client hardening). The Windows 11 checklist is non-blocking.
+   Update this file, then commit.

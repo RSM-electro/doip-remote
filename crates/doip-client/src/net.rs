@@ -1,61 +1,110 @@
-//! Network task lifecycle.
+//! Relay sessions and network task lifecycle.
 //!
-//! The relay/server is not implemented yet, but the shutdown path already has
-//! to be correct: every long-running `tokio` task must observe a
-//! [`CancellationToken`] and drop its sockets when the user finishes
-//! diagnostics. Dropping a listener closes the OS socket; accepted connections
-//! are closed explicitly so they do not linger in `TIME_WAIT`.
+//! Two roles share one relay session:
 //!
-//! [`NetworkService`] owns the token and a [`JoinSet`] of all spawned tasks.
-//! Call [`NetworkService::shutdown`] once to cancel everything and wait for the
-//! tasks to finish.
+//! * **Car** — connects to the relay, waits for the Diag peer, then dials the
+//!   vehicle (`vehicle_ip:doip_port`) and bridges the two sockets.
+//! * **Diag** — opens a local DoIP listener (`127.0.0.1:13400` by default),
+//!   waits for the Car peer, then bridges the first local diagnostic
+//!   connection to the relay.
+//!
+//! The relay is a transparent L4 pipe after the handshake, so no DoIP frame is
+//! parsed here. Every task observes a [`CancellationToken`]; [`NetworkService`]
+//! owns the token and a [`JoinSet`] of all spawned tasks, and
+//! [`NetworkService::shutdown`] waits for them to close their sockets.
 
-use std::{net::SocketAddr, time::Duration};
+use std::{
+    io,
+    net::{IpAddr, SocketAddr},
+    time::Duration,
+};
 
+use doip_core::{Role, SessionCode};
+use doip_protocol::{
+    read_message, write_message, ClientMessage, Hello, ServerMessage, PROTOCOL_VERSION,
+};
 use tokio::{
+    io::{copy_bidirectional, AsyncWriteExt},
     net::{TcpListener, TcpStream},
+    sync::mpsc::UnboundedSender,
     task::JoinSet,
+    time::timeout,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+use crate::app::ConnectionStatus;
+
 /// Shutdown budget before remaining network tasks are aborted.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 
-/// Placeholder ping interval until the relay protocol exists.
-const PING_INTERVAL: Duration = Duration::from_secs(5);
+/// Time allowed to reach the relay.
+const RELAY_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Time allowed to write the `Hello` control frame.
+const CONTROL_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long the client waits for the second peer.
+///
+/// The server expires pending sessions after 300 s; this is a slightly larger
+/// client-side bound so the server's `pending_timeout` error usually arrives
+/// first.
+const RELAY_PAIR_TIMEOUT: Duration = Duration::from_secs(330);
+
+/// Time allowed to dial the vehicle.
+const VEHICLE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Name sent to the relay for its logs.
+const CLIENT_NAME: &str = concat!("doip-client/", env!("CARGO_PKG_VERSION"));
+
+/// Network state changes surfaced to the UI loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetEvent {
+    /// The tunnel status changed.
+    Status(ConnectionStatus),
+    /// The session ended (paired tunnel closed, error or cancellation).
+    Finished,
+}
 
 /// Owns all network tasks and the cancellation token that stops them.
 #[derive(Debug)]
 pub struct NetworkService {
     cancel: CancellationToken,
+    events: UnboundedSender<NetEvent>,
     tasks: JoinSet<()>,
 }
 
 impl NetworkService {
-    /// Starts the placeholder network tasks.
+    /// Creates an idle service. Sessions are started by [`start_car`] and
+    /// [`start_diag`].
     ///
-    /// `listen` is reserved for the future DoIP listener (for example
-    /// `127.0.0.1:13400`); the client passes `None` until the server exists.
+    /// [`start_car`]: Self::start_car
+    /// [`start_diag`]: Self::start_diag
     #[must_use]
-    pub fn start(cancel: CancellationToken, listen: Option<SocketAddr>) -> Self {
-        let mut tasks = JoinSet::new();
-
-        let ping_cancel = cancel.clone();
-        tasks.spawn(async move {
-            ping_task(ping_cancel).await;
-        });
-
-        if let Some(addr) = listen {
-            let listen_cancel = cancel.clone();
-            tasks.spawn(async move {
-                bind_and_serve(addr, listen_cancel).await;
-            });
+    pub fn new(cancel: CancellationToken, events: UnboundedSender<NetEvent>) -> Self {
+        Self {
+            cancel,
+            events,
+            tasks: JoinSet::new(),
         }
+    }
 
-        info!("Network tasks started (stub).");
+    /// Spawns the Car session: relay pairing, vehicle dial-out, bridge.
+    pub fn start_car(&mut self, session: SessionCode) {
+        let cancel = self.cancel.clone();
+        let events = self.events.clone();
+        self.tasks.spawn(async move {
+            run_car(session, cancel, events).await;
+        });
+    }
 
-        Self { cancel, tasks }
+    /// Spawns the Diag session: local listener, relay pairing, bridge.
+    pub fn start_diag(&mut self, session: SessionCode, listen: SocketAddr) {
+        let cancel = self.cancel.clone();
+        let events = self.events.clone();
+        self.tasks.spawn(async move {
+            run_diag(session, listen, cancel, events).await;
+        });
     }
 
     /// Cancels every task, waits for the join set to drain and closes sockets.
@@ -81,74 +130,298 @@ impl NetworkService {
     }
 }
 
-/// Periodically pings the relay. Everything wakes up on cancellation.
-async fn ping_task(cancel: CancellationToken) {
+/// Connects to the relay and performs the handshake until `Paired`.
+async fn connect_relay(session: &SessionCode, role: Role) -> io::Result<TcpStream> {
+    info!(
+        "Connecting to relay {} (session {})...",
+        session.server, session.session_id
+    );
+
+    let mut stream = timeout(
+        RELAY_CONNECT_TIMEOUT,
+        TcpStream::connect(session.server.as_str()),
+    )
+    .await
+    .map_err(|_| timeout_error("connecting to the relay", RELAY_CONNECT_TIMEOUT))??;
+
+    let _ = stream.set_nodelay(true);
+
+    let hello = ClientMessage::Hello(Hello {
+        v: PROTOCOL_VERSION,
+        session: session.session_id.clone(),
+        token: session.token.clone(),
+        role,
+        client: Some(CLIENT_NAME.to_owned()),
+    });
+
+    timeout(CONTROL_WRITE_TIMEOUT, write_message(&mut stream, &hello))
+        .await
+        .map_err(|_| timeout_error("sending the handshake", CONTROL_WRITE_TIMEOUT))?
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+
     loop {
-        tokio::select! {
-            () = cancel.cancelled() => break,
-            () = tokio::time::sleep(PING_INTERVAL) => {
-                // No relay yet: this is where the keep-alive would go.
+        let message = timeout(
+            RELAY_PAIR_TIMEOUT,
+            read_message::<ServerMessage, _>(&mut stream),
+        )
+        .await
+        .map_err(|_| timeout_error("waiting for the peer", RELAY_PAIR_TIMEOUT))?
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+
+        match message {
+            ServerMessage::Waiting { session } => {
+                info!("Relay accepted session {session}; waiting for the peer...");
+            }
+            ServerMessage::Paired { session } => {
+                info!("[OK] Relay paired session {session}.");
+                return Ok(stream);
+            }
+            ServerMessage::Error { code, message } => {
+                return Err(io::Error::new(
+                    io::ErrorKind::ConnectionRefused,
+                    format!("relay rejected the session ({code:?}): {message}"),
+                ));
             }
         }
     }
 }
 
-/// Binds the DoIP listener and serves it until cancellation.
-async fn bind_and_serve(addr: SocketAddr, cancel: CancellationToken) {
-    match TcpListener::bind(addr).await {
-        Ok(listener) => serve_listener(listener, cancel).await,
-        Err(error) => warn!("Failed to open socket {addr}: {error}"),
+/// Car side: pair with the Diag, dial the vehicle and forward both directions.
+async fn run_car(
+    session: SessionCode,
+    cancel: CancellationToken,
+    events: UnboundedSender<NetEvent>,
+) {
+    let result = car_session(&session, &cancel, &events).await;
+
+    if let Err(error) = result {
+        warn!("Car session failed: {error}");
     }
+
+    let _ = events.send(NetEvent::Finished);
 }
 
-/// Accepts placeholder connections until the token is cancelled.
-///
-/// The listener is dropped on exit, which releases the port. Nothing is kept in
-/// `TIME_WAIT` for the listener itself; accepted streams are reset explicitly.
-async fn serve_listener(listener: TcpListener, cancel: CancellationToken) {
-    if let Ok(addr) = listener.local_addr() {
-        info!("DoIP listener started on {addr} (stub).");
-    }
+async fn car_session(
+    session: &SessionCode,
+    cancel: &CancellationToken,
+    events: &UnboundedSender<NetEvent>,
+) -> io::Result<()> {
+    let relay = tokio::select! {
+        () = cancel.cancelled() => return Err(cancelled_error()),
+        result = connect_relay(session, Role::Car) => result?,
+    };
 
-    loop {
-        tokio::select! {
-            () = cancel.cancelled() => break,
-            accepted = listener.accept() => match accepted {
-                Ok((stream, peer)) => close_stream(stream, peer),
-                Err(error) => {
-                    warn!("Accept error: {error}");
-                    break;
-                }
-            },
+    let vehicle = vehicle_address(session).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "session code has no vehicle IP; pass --vehicle <IP[:PORT]>",
+        )
+    })?;
+
+    info!("Dialing vehicle {vehicle}...");
+    let mut vehicle_stream = match timeout(
+        VEHICLE_CONNECT_TIMEOUT,
+        TcpStream::connect(vehicle.as_str()),
+    )
+    .await
+    {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(error)) => {
+            return Err(io::Error::new(
+                error.kind(),
+                format!("could not connect to the vehicle at {vehicle}: {error}"),
+            ));
         }
-    }
+        Err(_) => {
+            return Err(timeout_error(
+                "connecting to the vehicle",
+                VEHICLE_CONNECT_TIMEOUT,
+            ));
+        }
+    };
 
-    // Dropping the listener closes the listening socket and releases the port.
-    drop(listener);
-    info!("DoIP listener stopped.");
+    let _ = vehicle_stream.set_nodelay(true);
+    info!("[OK] Tunnel established: vehicle {vehicle} <-> relay.");
+
+    let mut relay = relay;
+    let _ = events.send(NetEvent::Status(ConnectionStatus::Connected));
+    bridge(&mut relay, &mut vehicle_stream, "vehicle", cancel).await;
+    Ok(())
 }
 
-/// Closes an accepted connection without leaving it in `TIME_WAIT`.
-#[allow(deprecated)] // `set_linger` is deprecated in tokio, but linger(0) is what
-                     // prevents a graceful FIN from keeping the socket around.
-fn close_stream(stream: TcpStream, peer: SocketAddr) {
-    // Linger(0) sends RST on close instead of a graceful FIN handshake.
-    if let Err(error) = stream.set_linger(Some(Duration::ZERO)) {
-        warn!("Failed to set linger for {peer}: {error}");
+/// Diag side: open the local listener, pair with the Car and bridge one client.
+async fn run_diag(
+    session: SessionCode,
+    listen: SocketAddr,
+    cancel: CancellationToken,
+    events: UnboundedSender<NetEvent>,
+) {
+    let result = diag_session(&session, listen, &cancel, &events).await;
+
+    if let Err(error) = result {
+        warn!("Diag session failed: {error}");
     }
-    drop(stream);
-    info!("Connection with {peer} closed.");
+
+    let _ = events.send(NetEvent::Finished);
+}
+
+async fn diag_session(
+    session: &SessionCode,
+    listen: SocketAddr,
+    cancel: &CancellationToken,
+    events: &UnboundedSender<NetEvent>,
+) -> io::Result<()> {
+    // Bind first: an occupied port fails fast, before the Car is disturbed.
+    let listener = TcpListener::bind(listen).await.map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("could not listen on {listen}: {error}"),
+        )
+    })?;
+
+    serve_diag_inner(listener, session, cancel, events).await
+}
+
+/// Serves one already-bound Diag listener (used by the end-to-end test).
+#[cfg(test)]
+async fn serve_diag(
+    listener: TcpListener,
+    session: SessionCode,
+    cancel: CancellationToken,
+    events: UnboundedSender<NetEvent>,
+) {
+    let result = serve_diag_inner(listener, &session, &cancel, &events).await;
+
+    if let Err(error) = result {
+        warn!("Diag session failed: {error}");
+    }
+
+    let _ = events.send(NetEvent::Finished);
+}
+
+async fn serve_diag_inner(
+    listener: TcpListener,
+    session: &SessionCode,
+    cancel: &CancellationToken,
+    events: &UnboundedSender<NetEvent>,
+) -> io::Result<()> {
+    let listen = listener.local_addr()?;
+    info!("[OK] Local DoIP listener on {listen}.");
+
+    let relay = tokio::select! {
+        () = cancel.cancelled() => return Err(cancelled_error()),
+        result = connect_relay(session, Role::Diag) => result?,
+    };
+
+    info!("Waiting for a local diagnostic client on {listen}...");
+    let (mut local, peer) = tokio::select! {
+        () = cancel.cancelled() => return Err(cancelled_error()),
+        accepted = listener.accept() => accepted?,
+    };
+
+    info!("Diagnostic client connected from {peer}.");
+    let _ = local.set_nodelay(true);
+    info!("[OK] Tunnel established: relay <-> local client {peer}.");
+
+    let mut relay = relay;
+    let _ = events.send(NetEvent::Status(ConnectionStatus::Connected));
+    bridge(&mut relay, &mut local, "diagnostic client", cancel).await;
+    Ok(())
+}
+
+/// Forwards raw bytes until both sides finish or the token is cancelled.
+async fn bridge(
+    relay: &mut TcpStream,
+    local: &mut TcpStream,
+    local_name: &'static str,
+    cancel: &CancellationToken,
+) {
+    let _ = relay.set_nodelay(true);
+    let _ = local.set_nodelay(true);
+
+    let result = tokio::select! {
+        () = cancel.cancelled() => None,
+        result = copy_bidirectional(relay, local) => Some(result),
+    };
+
+    let _ = relay.shutdown().await;
+    let _ = local.shutdown().await;
+
+    match result {
+        Some(Ok((relay_to_local, local_to_relay))) => info!(
+            local = local_name,
+            relay_to_local, local_to_relay, "Tunnel closed."
+        ),
+        Some(Err(error)) => warn!(local = local_name, %error, "Tunnel failed."),
+        None => info!(local = local_name, "Tunnel stopped by cancellation."),
+    }
+}
+
+/// Builds the vehicle socket address from the session code.
+fn vehicle_address(session: &SessionCode) -> Option<String> {
+    let host = session.vehicle_ip.as_deref()?.trim();
+    if host.is_empty() {
+        return None;
+    }
+
+    Some(format_host_port(host, session.doip_port))
+}
+
+/// Formats `host:port`, bracketing IPv6 literals.
+fn format_host_port(host: &str, port: u16) -> String {
+    if host.parse::<IpAddr>().is_ok_and(|ip| ip.is_ipv6()) && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
+fn timeout_error(action: &str, duration: Duration) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::TimedOut,
+        format!("timed out {action} after {} s", duration.as_secs()),
+    )
+}
+
+fn cancelled_error() -> io::Error {
+    io::Error::new(io::ErrorKind::Interrupted, "session cancelled")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::net::TcpStream;
+    use doip_protocol::{ErrorCode, MAX_CONTROL_FRAME};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        sync::mpsc,
+    };
+
+    fn session(relay: SocketAddr, id: &str, token: &str, role: Role) -> SessionCode {
+        SessionCode {
+            role,
+            server: relay.to_string(),
+            session_id: id.to_owned(),
+            token: token.to_owned(),
+            key: "test-key".to_owned(),
+            bridge: true,
+            doip_port: 13400,
+            vehicle_ip: None,
+        }
+    }
+
+    fn drain(receiver: &mut mpsc::UnboundedReceiver<NetEvent>) -> Vec<NetEvent> {
+        let mut events = Vec::new();
+        while let Ok(event) = receiver.try_recv() {
+            events.push(event);
+        }
+        events
+    }
 
     #[tokio::test]
-    async fn shutdown_stops_all_tasks_promptly() {
+    async fn shutdown_stops_an_idle_service_promptly() {
         let cancel = CancellationToken::new();
-        let service = NetworkService::start(cancel, None);
+        let (events, _receiver) = mpsc::unbounded_channel();
+        let service = NetworkService::new(cancel, events);
 
         tokio::time::timeout(Duration::from_secs(2), service.shutdown())
             .await
@@ -156,49 +429,193 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn listener_releases_its_port_after_cancellation() {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind ephemeral listener");
-        let addr = listener.local_addr().expect("local address");
-        let cancel = CancellationToken::new();
+    async fn handshake_waits_for_waiting_then_pairs() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("address");
 
-        let task = tokio::spawn(serve_listener(listener, cancel.clone()));
+        let relay = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let ClientMessage::Hello(hello) = read_message::<ClientMessage, _>(&mut socket)
+                .await
+                .expect("read hello");
 
-        // Prove that the listener is actually accepting before we stop it.
-        TcpStream::connect(addr)
-            .await
-            .expect("listener must accept connections");
+            assert_eq!(hello.role, Role::Car);
+            assert_eq!(hello.session, "handshake-session");
 
-        cancel.cancel();
-        tokio::time::timeout(Duration::from_secs(2), task)
+            write_message(
+                &mut socket,
+                &ServerMessage::Waiting {
+                    session: hello.session.clone(),
+                },
+            )
             .await
-            .expect("listener task must stop")
-            .expect("listener task must not panic");
+            .expect("write waiting");
+            write_message(
+                &mut socket,
+                &ServerMessage::Paired {
+                    session: hello.session,
+                },
+            )
+            .await
+            .expect("write paired");
+        });
 
-        // The port is free again: no lingering socket blocks the rebind.
-        TcpListener::bind(addr)
-            .await
-            .expect("port must be released after shutdown");
+        let stream = connect_relay(
+            &session(address, "handshake-session", "token", Role::Car),
+            Role::Car,
+        )
+        .await
+        .expect("paired stream");
+
+        assert!(stream.peer_addr().is_ok());
+        relay.await.expect("relay task");
     }
 
     #[tokio::test]
-    async fn cancellable_listener_survives_an_explicit_shutdown() {
-        let probe = TcpListener::bind("127.0.0.1:0").await.expect("probe bind");
-        let addr = probe.local_addr().expect("probe address");
-        drop(probe);
+    async fn handshake_error_is_reported() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("address");
+
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let _ = read_message::<ClientMessage, _>(&mut socket)
+                .await
+                .expect("read hello");
+            write_message(
+                &mut socket,
+                &ServerMessage::error(ErrorCode::TokenMismatch, "session token does not match"),
+            )
+            .await
+            .expect("write error");
+        });
+
+        let error = connect_relay(
+            &session(address, "wrong-token", "token", Role::Car),
+            Role::Car,
+        )
+        .await
+        .expect_err("handshake must fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionRefused);
+        assert!(error.to_string().contains("TokenMismatch"));
+    }
+
+    #[tokio::test]
+    async fn oversized_handshake_reply_is_rejected() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("address");
+
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let _ = read_message::<ClientMessage, _>(&mut socket).await;
+            let length = u32::try_from(MAX_CONTROL_FRAME + 1).expect("length fits");
+            socket
+                .write_all(&length.to_be_bytes())
+                .await
+                .expect("write length");
+        });
+
+        let error = connect_relay(
+            &session(address, "oversized", "token", Role::Car),
+            Role::Car,
+        )
+        .await
+        .expect_err("oversized reply must fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    /// Echoes every byte until the peer closes.
+    async fn spawn_echo_vehicle() -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind echo");
+        let address = listener.local_addr().expect("echo address");
+
+        let task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept echo");
+            let mut buffer = [0_u8; 1024];
+
+            loop {
+                match socket.read(&mut buffer).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => {
+                        if socket.write_all(&buffer[..read]).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        (address, task)
+    }
+
+    #[tokio::test]
+    async fn car_and_diag_forward_bytes_through_the_relay() {
+        let (vehicle, vehicle_task) = spawn_echo_vehicle().await;
+
+        let relay = doip_server::Server::bind(doip_server::Config {
+            listen: "127.0.0.1:0".parse().expect("relay address"),
+            handshake_timeout: Duration::from_secs(2),
+            pending_timeout: Duration::from_secs(10),
+            max_pending_sessions: 8,
+        })
+        .await
+        .expect("bind relay");
+
+        let local_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind local");
+        let local_address = local_listener.local_addr().expect("local address");
+
+        let car_session = SessionCode {
+            vehicle_ip: Some(vehicle.ip().to_string()),
+            doip_port: vehicle.port(),
+            ..session(relay.local_addr(), "client-e2e", "shared-token", Role::Car)
+        };
+        let diag_session = session(relay.local_addr(), "client-e2e", "shared-token", Role::Diag);
 
         let cancel = CancellationToken::new();
-        let service = NetworkService::start(cancel.clone(), Some(addr));
+        let (car_tx, mut car_rx) = mpsc::unbounded_channel();
+        let (diag_tx, mut diag_rx) = mpsc::unbounded_channel();
 
-        // Give the background bind a moment, then cancel everything.
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        tokio::time::timeout(Duration::from_secs(2), service.shutdown())
-            .await
-            .expect("shutdown must not hang");
+        let diag_cancel = cancel.clone();
+        let diag_task = tokio::spawn(serve_diag(
+            local_listener,
+            diag_session,
+            diag_cancel,
+            diag_tx,
+        ));
+        let car_cancel = cancel.clone();
+        let car_task = tokio::spawn(run_car(car_session, car_cancel, car_tx));
 
-        TcpListener::bind(addr)
+        let mut tester = TcpStream::connect(local_address)
             .await
-            .expect("port must be released after shutdown");
+            .expect("connect local Diagnostic client");
+        tester
+            .write_all(b"echo through the relay")
+            .await
+            .expect("write payload");
+
+        let mut echo = vec![0_u8; b"echo through the relay".len()];
+        timeout(Duration::from_secs(10), tester.read_exact(&mut echo))
+            .await
+            .expect("echo timed out")
+            .expect("read echo");
+        assert_eq!(echo, b"echo through the relay");
+
+        drop(tester);
+
+        timeout(Duration::from_secs(10), car_task)
+            .await
+            .expect("car task timed out")
+            .expect("car task panicked");
+        timeout(Duration::from_secs(10), diag_task)
+            .await
+            .expect("diag task timed out")
+            .expect("diag task panicked");
+
+        assert!(drain(&mut car_rx).contains(&NetEvent::Status(ConnectionStatus::Connected)));
+        assert!(drain(&mut diag_rx).contains(&NetEvent::Status(ConnectionStatus::Connected)));
+
+        relay.shutdown().await;
+        let _ = vehicle_task.await;
     }
 }
