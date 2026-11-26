@@ -81,3 +81,47 @@ ssh root@176.53.237.193 'systemctl restart doip-server'
 The unit uses `Restart=on-failure`; configuration flags can be added to
 `ExecStart` in `deploy/doip-server.service` (for example
 `--pending-timeout 600`).
+
+## Fast path: install a locally built binary
+
+Building on the VPS is optional. A release binary built on a Linux x86_64 host is
+compatible as long as it needs at most `GLIBC_2.34` (the reference host runs
+Debian 13 with glibc `2.41`). Check with:
+
+```sh
+objdump -T target/release/doip-server | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1
+```
+
+Then copy and swap it in atomically, and restart the unit:
+
+```sh
+cargo build --release -p doip-server
+scp target/release/doip-server root@176.53.237.193:/root/doip-server
+
+ssh root@176.53.237.193 '
+  chmod +x /root/doip-server &&
+  install -m 0755 /root/doip-server /usr/local/bin/doip-server.new &&
+  mv /usr/local/bin/doip-server.new /usr/local/bin/doip-server &&
+  systemctl restart doip-server
+'
+```
+
+The `.new` + `mv` swap avoids replacing the binary while systemd is starting it.
+Confirm the copy and the running service:
+
+```sh
+sha256sum target/release/doip-server
+ssh root@176.53.237.193 '
+  sha256sum /usr/local/bin/doip-server
+  systemctl is-active doip-server
+  ss -ltnp | grep 13500
+'
+```
+
+Use the systemd unit rather than a second `nohup` process: a second instance
+would fail to bind `0.0.0.0:13500`. The binary takes `--listen 0.0.0.0:13500`,
+not `--port`.
+
+> Note: the `doip-relay` SSH alias may not exist on every workstation. If
+> `ssh doip-relay` fails with `Could not resolve hostname`, use
+> `root@176.53.237.193` with the same key.

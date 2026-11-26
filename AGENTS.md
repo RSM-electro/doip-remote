@@ -139,6 +139,24 @@ and record important architecture decisions as they are made.
   `tunnel closed ... car_to_diag=9 diag_to_car=9`. The production protocol stays
   the shared length-prefixed JSON handshake (`doip-protocol`); it was **not**
   downgraded to first-line `DT1-` + `Arc<Mutex<HashMap>>`.
+  **VPS deployment (2026-11-26):** rebuilt `doip-server` natively on the Linux
+  workstation (`cargo build --release -p doip-server`), copied it with `scp` to
+  `/root/doip-server`, installed it atomically to `/usr/local/bin/doip-server`
+  (`install -m 0755 … .new` then `mv`), and restarted the existing
+  `doip-server.service`. The binary requires at most `GLIBC_2.34` (checked with
+  `objdump -T`); the VPS runs Debian 13.7 with glibc `2.41`, so it is compatible.
+  Local and remote SHA-256 match:
+  `a4a19b181ba41212840f39fc9d06461d77f839b06e2333d9e8771795b37c304b`.
+  The service is `active`/`enabled` (PID 18094) and listens on `0.0.0.0:13500`;
+  `ufw` still allows only `22/tcp` and `13500/tcp` (IPv4 + IPv6). A public
+  pairing test from the workstation (`deploy-verify-1795684067`) received
+  `waiting` → `paired` on both sockets and exchanged 10 bytes (`car→diag`) and
+  11 bytes (`diag→car`); the journal logged `paired session` and
+  `tunnel closed … car_to_diag=10 diag_to_car=11 elapsed_ms=15`.
+  The `doip-relay` SSH alias is **not** configured on this workstation, so the
+  commands use `root@176.53.237.193` directly. A second `nohup` instance was
+  deliberately avoided because it would collide with the systemd unit on port
+  `13500`; the binary accepts `--listen`, not `--port`.
 - **Next Step:** Backend encryption (TLS/Noise) still deferred by design. Before
   that, consider client hardening: allow a new Diag connection after the first
   one closes (currently one tunnel serves one local DoIP connection), auto-detect
@@ -150,8 +168,8 @@ and record important architecture decisions as they are made.
   `fix(lifecycle): definitively resolve cleanup crash and implement strict menu blocking`,
   the `panic.log` diagnostics commit, the strict post-cleanup lifecycle fix
   (console isolation, quit fence, hidden-window restoration), the plaintext
-  relay protocol, server and deployment checkpoints, and client relay
-  integration.
+  relay protocol, server and deployment checkpoints, client relay integration,
+  and the native VPS binary redeploy.
 
 ## Architecture
 
@@ -377,6 +395,10 @@ cargo run -p doip-client -- --relay 127.0.0.1:13500 --vehicle 127.0.0.1:13400
 cargo run -p doip-client -- --relay 127.0.0.1:13500   # Diag mode (menu 3)
 # deployment (see deploy/README.md)
 rsync -az --exclude target --exclude .git ./ root@176.53.237.193:/opt/doip-remote/src/
+# fast path: build locally, copy the binary, restart the unit
+cargo build --release -p doip-server
+scp target/release/doip-server root@176.53.237.193:/root/doip-server
+ssh root@176.53.237.193 'install -m 0755 /root/doip-server /usr/local/bin/doip-server.new && mv /usr/local/bin/doip-server.new /usr/local/bin/doip-server && systemctl restart doip-server'
 cargo run -p doip-client -- --mock   # preview with admin/drivers emulated
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
@@ -421,6 +443,15 @@ cargo clippy -p doip-client --all-targets --target x86_64-pc-windows-msvc -- -D 
   against a local `doip-server` paired two sockets with the same session id and
   exchanged 9 bytes in each direction (`car_to_diag=9 diag_to_car=9`). No
   protocol rewrite was needed.
+- VPS binary redeploy (2026-11-26): native `cargo build --release -p doip-server`
+  succeeded in 21.5 s; the binary is 2.6 MB and needs at most `GLIBC_2.34`
+  (VPS glibc `2.41`). `scp` + atomic `install` + `systemctl restart` left the
+  service `active`/`enabled` on PID 18094, listening on `0.0.0.0:13500`.
+  SHA-256 matched locally and remotely
+  (`a4a19b181ba41212840f39fc9d06461d77f839b06e2333d9e8771795b37c304b`). Public
+  pairing test `deploy-verify-1795684067`: `waiting` → `paired`, 10 bytes
+  `car→diag`, 11 bytes `diag→car`, `elapsed_ms=15`. `ufw status numbered` shows
+  only `22/tcp` and `13500/tcp` for IPv4 and IPv6.
 - `cargo fmt --all --check` and
   `cargo clippy --workspace --all-targets -- -D warnings` — clean.
 - Windows target code: `cargo check`/`clippy` for
@@ -481,6 +512,10 @@ cargo clippy -p doip-client --all-targets --target x86_64-pc-windows-msvc -- -D 
   `build-essential`, git and rsync are installed. The service runs as the system
   user `doip` from `/usr/local/bin/doip-server`; source mirror is
   `/opt/doip-remote/src`.
+- The `doip-relay` SSH alias is not configured on this workstation; use
+  `root@176.53.237.193` (the key is already installed). The VPS runs Debian 13.7,
+  hostname `doip-relay`, glibc `2.41`, which runs binaries built here against
+  glibc `2.44` as long as they need at most `GLIBC_2.34`.
 - The relay is plaintext-only for now (no TLS, no end-to-end encryption), so it
   is for development/staging. Do not expose real vehicle traffic yet.
 
