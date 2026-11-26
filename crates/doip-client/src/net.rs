@@ -24,7 +24,7 @@ use doip_protocol::{
     read_message, write_message, ClientMessage, Hello, ServerMessage, PROTOCOL_VERSION,
 };
 use tokio::{
-    io::{copy_bidirectional, AsyncWriteExt},
+    io::{copy_bidirectional, AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     sync::mpsc::UnboundedSender,
     task::JoinSet,
@@ -90,20 +90,28 @@ impl NetworkService {
     }
 
     /// Spawns the Car session: relay pairing, vehicle dial-out, bridge.
-    pub fn start_car(&mut self, session: SessionCode) {
+    ///
+    /// With `hold`, the paired relay socket is kept open instead of dialing the
+    /// vehicle. This is a connectivity test mode: it needs no vehicle and no
+    /// local proxy.
+    pub fn start_car(&mut self, session: SessionCode, hold: bool) {
         let cancel = self.cancel.clone();
         let events = self.events.clone();
         self.tasks.spawn(async move {
-            run_car(session, cancel, events).await;
+            run_car(session, hold, cancel, events).await;
         });
     }
 
     /// Spawns the Diag session: local listener, relay pairing, bridge.
-    pub fn start_diag(&mut self, session: SessionCode, listen: SocketAddr) {
+    ///
+    /// With `hold`, no local listener is bound; the paired relay socket is kept
+    /// open instead. This avoids the default `13400` collision when both roles
+    /// run on the same machine.
+    pub fn start_diag(&mut self, session: SessionCode, listen: SocketAddr, hold: bool) {
         let cancel = self.cancel.clone();
         let events = self.events.clone();
         self.tasks.spawn(async move {
-            run_diag(session, listen, cancel, events).await;
+            run_diag(session, listen, hold, cancel, events).await;
         });
     }
 
@@ -131,7 +139,14 @@ impl NetworkService {
 }
 
 /// Connects to the relay and performs the handshake until `Paired`.
-async fn connect_relay(session: &SessionCode, role: Role) -> io::Result<TcpStream> {
+///
+/// Emits [`ConnectionStatus::Waiting`] as soon as the relay accepts the
+/// handshake and reports that the peer is still missing.
+async fn connect_relay(
+    session: &SessionCode,
+    role: Role,
+    events: &UnboundedSender<NetEvent>,
+) -> io::Result<TcpStream> {
     info!(
         "Connecting to relay {} (session {})...",
         session.server, session.session_id
@@ -171,6 +186,7 @@ async fn connect_relay(session: &SessionCode, role: Role) -> io::Result<TcpStrea
         match message {
             ServerMessage::Waiting { session } => {
                 info!("Relay accepted session {session}; waiting for the peer...");
+                let _ = events.send(NetEvent::Status(ConnectionStatus::Waiting));
             }
             ServerMessage::Paired { session } => {
                 info!("[OK] Relay paired session {session}.");
@@ -189,10 +205,11 @@ async fn connect_relay(session: &SessionCode, role: Role) -> io::Result<TcpStrea
 /// Car side: pair with the Diag, dial the vehicle and forward both directions.
 async fn run_car(
     session: SessionCode,
+    hold: bool,
     cancel: CancellationToken,
     events: UnboundedSender<NetEvent>,
 ) {
-    let result = car_session(&session, &cancel, &events).await;
+    let result = car_session(&session, hold, &cancel, &events).await;
 
     if let Err(error) = result {
         warn!("Car session failed: {error}");
@@ -203,13 +220,20 @@ async fn run_car(
 
 async fn car_session(
     session: &SessionCode,
+    hold: bool,
     cancel: &CancellationToken,
     events: &UnboundedSender<NetEvent>,
 ) -> io::Result<()> {
     let relay = tokio::select! {
         () = cancel.cancelled() => return Err(cancelled_error()),
-        result = connect_relay(session, Role::Car) => result?,
+        result = connect_relay(session, Role::Car, events) => result?,
     };
+
+    if hold {
+        let _ = events.send(NetEvent::Status(ConnectionStatus::Connected));
+        info!("[OK] Hold mode: relay session paired; no vehicle dial-out.");
+        return hold_open(relay, cancel).await;
+    }
 
     let vehicle = vehicle_address(session).ok_or_else(|| {
         io::Error::new(
@@ -253,10 +277,11 @@ async fn car_session(
 async fn run_diag(
     session: SessionCode,
     listen: SocketAddr,
+    hold: bool,
     cancel: CancellationToken,
     events: UnboundedSender<NetEvent>,
 ) {
-    let result = diag_session(&session, listen, &cancel, &events).await;
+    let result = diag_session(&session, listen, hold, &cancel, &events).await;
 
     if let Err(error) = result {
         warn!("Diag session failed: {error}");
@@ -268,9 +293,21 @@ async fn run_diag(
 async fn diag_session(
     session: &SessionCode,
     listen: SocketAddr,
+    hold: bool,
     cancel: &CancellationToken,
     events: &UnboundedSender<NetEvent>,
 ) -> io::Result<()> {
+    if hold {
+        let relay = tokio::select! {
+            () = cancel.cancelled() => return Err(cancelled_error()),
+            result = connect_relay(session, Role::Diag, events) => result?,
+        };
+
+        let _ = events.send(NetEvent::Status(ConnectionStatus::Connected));
+        info!("[OK] Hold mode: relay session paired; no local listener bound.");
+        return hold_open(relay, cancel).await;
+    }
+
     // Bind first: an occupied port fails fast, before the Car is disturbed.
     let listener = TcpListener::bind(listen).await.map_err(|error| {
         io::Error::new(
@@ -310,7 +347,7 @@ async fn serve_diag_inner(
 
     let relay = tokio::select! {
         () = cancel.cancelled() => return Err(cancelled_error()),
-        result = connect_relay(session, Role::Diag) => result?,
+        result = connect_relay(session, Role::Diag, events) => result?,
     };
 
     info!("Waiting for a local diagnostic client on {listen}...");
@@ -355,6 +392,37 @@ async fn bridge(
         Some(Err(error)) => warn!(local = local_name, %error, "Tunnel failed."),
         None => info!(local = local_name, "Tunnel stopped by cancellation."),
     }
+}
+
+/// Keeps a paired relay socket open without a local proxy or vehicle.
+///
+/// This is the `--hold` connectivity-test mode: bytes are read and discarded so
+/// both peers can verify that pairing against the VPS works and the socket stays
+/// alive. It is **not** a DoIP tunnel.
+async fn hold_open(mut relay: TcpStream, cancel: &CancellationToken) -> io::Result<()> {
+    let mut buffer = vec![0_u8; 4096];
+    let mut received: u64 = 0;
+
+    loop {
+        let read = tokio::select! {
+            () = cancel.cancelled() => {
+                info!(received, "Hold mode stopped by cancellation.");
+                break;
+            }
+            result = relay.read(&mut buffer) => result?,
+        };
+
+        if read == 0 {
+            info!(received, "Peer closed the relay connection.");
+            break;
+        }
+
+        received += read as u64;
+        info!(received, bytes = read, "Hold mode: relay socket alive.");
+    }
+
+    let _ = relay.shutdown().await;
+    Ok(())
 }
 
 /// Builds the vehicle socket address from the session code.
@@ -460,14 +528,17 @@ mod tests {
             .expect("write paired");
         });
 
+        let (events, mut receiver) = mpsc::unbounded_channel();
         let stream = connect_relay(
             &session(address, "handshake-session", "token", Role::Car),
             Role::Car,
+            &events,
         )
         .await
         .expect("paired stream");
 
         assert!(stream.peer_addr().is_ok());
+        assert!(drain(&mut receiver).contains(&NetEvent::Status(ConnectionStatus::Waiting)));
         relay.await.expect("relay task");
     }
 
@@ -489,9 +560,11 @@ mod tests {
             .expect("write error");
         });
 
+        let (events, _receiver) = mpsc::unbounded_channel();
         let error = connect_relay(
             &session(address, "wrong-token", "token", Role::Car),
             Role::Car,
+            &events,
         )
         .await
         .expect_err("handshake must fail");
@@ -515,9 +588,11 @@ mod tests {
                 .expect("write length");
         });
 
+        let (events, _receiver) = mpsc::unbounded_channel();
         let error = connect_relay(
             &session(address, "oversized", "token", Role::Car),
             Role::Car,
+            &events,
         )
         .await
         .expect_err("oversized reply must fail");
@@ -547,6 +622,84 @@ mod tests {
         });
 
         (address, task)
+    }
+
+    /// Waits until the status stream reports `Connected`, returning every event.
+    async fn wait_for_connected(rx: &mut mpsc::UnboundedReceiver<NetEvent>) -> Vec<NetEvent> {
+        let mut seen = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let event = timeout(remaining, rx.recv())
+                .await
+                .expect("timed out waiting for Connected")
+                .expect("event channel closed");
+
+            seen.push(event);
+            if event == NetEvent::Status(ConnectionStatus::Connected) {
+                return seen;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn hold_mode_pairs_and_keeps_the_relay_socket_open() {
+        let relay = doip_server::Server::bind(doip_server::Config {
+            listen: "127.0.0.1:0".parse().expect("relay address"),
+            handshake_timeout: Duration::from_secs(2),
+            pending_timeout: Duration::from_secs(10),
+            max_pending_sessions: 8,
+        })
+        .await
+        .expect("bind relay");
+
+        let car = session(relay.local_addr(), "hold-e2e", "shared-token", Role::Car);
+        let diag = session(relay.local_addr(), "hold-e2e", "shared-token", Role::Diag);
+
+        let cancel = CancellationToken::new();
+        let (car_tx, mut car_rx) = mpsc::unbounded_channel();
+        let (diag_tx, mut diag_rx) = mpsc::unbounded_channel();
+
+        let car_task = tokio::spawn(run_car(car, true, cancel.clone(), car_tx));
+        let diag_task = tokio::spawn(run_diag(
+            diag,
+            "127.0.0.1:0".parse().expect("listen address"),
+            true,
+            cancel.clone(),
+            diag_tx,
+        ));
+
+        let car_events = wait_for_connected(&mut car_rx).await;
+        let diag_events = wait_for_connected(&mut diag_rx).await;
+
+        // The second peer is paired immediately, so only the first one observes
+        // `Waiting`; both must end up `Connected`.
+        assert!(
+            car_events.contains(&NetEvent::Status(ConnectionStatus::Waiting))
+                || diag_events.contains(&NetEvent::Status(ConnectionStatus::Waiting)),
+            "the first peer must observe the waiting state"
+        );
+
+        // Hold mode keeps the paired socket open until the session is cancelled.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !car_task.is_finished(),
+            "the Car hold session must stay alive after pairing"
+        );
+
+        cancel.cancel();
+
+        timeout(Duration::from_secs(10), car_task)
+            .await
+            .expect("car task timed out")
+            .expect("car task panicked");
+        timeout(Duration::from_secs(10), diag_task)
+            .await
+            .expect("diag task timed out")
+            .expect("diag task panicked");
+
+        relay.shutdown().await;
     }
 
     #[tokio::test]
@@ -584,7 +737,7 @@ mod tests {
             diag_tx,
         ));
         let car_cancel = cancel.clone();
-        let car_task = tokio::spawn(run_car(car_session, car_cancel, car_tx));
+        let car_task = tokio::spawn(run_car(car_session, false, car_cancel, car_tx));
 
         let mut tester = TcpStream::connect(local_address)
             .await

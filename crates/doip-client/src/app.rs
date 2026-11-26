@@ -23,8 +23,10 @@ pub enum Focus {
 pub enum ConnectionStatus {
     /// No tunnel has been established.
     Disconnected,
-    /// The relay session is being negotiated, or a peer/local client is awaited.
+    /// The relay session is being negotiated (TCP connect + handshake).
     Connecting,
+    /// The relay accepted the handshake; the session waits for its peer.
+    Waiting,
     /// The relay tunnel is paired and bytes are being forwarded.
     Connected,
 }

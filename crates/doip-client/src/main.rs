@@ -46,6 +46,7 @@ Options:
   --relay <ADDR>           Relay server address [default: 176.53.237.193:13500]
   --vehicle <HOST[:PORT]>  Vehicle target for Car mode [default: 127.0.0.1:13400]
   --diag-listen <ADDR>     Local listener for Diag mode [default: 127.0.0.1:13400]
+  --hold                   Pair and keep the relay socket open (test mode)
   --mock                   Preview the dashboard without drivers
   -h, --help               Print help
   -V, --version            Print version";
@@ -57,6 +58,9 @@ struct ClientConfig {
     vehicle: Option<String>,
     diag_listen: Option<SocketAddr>,
     mock: bool,
+    /// Pair with the relay and keep the socket open without a vehicle or local
+    /// listener. Used for connectivity tests from a single machine.
+    hold: bool,
 }
 
 impl Default for ClientConfig {
@@ -66,6 +70,7 @@ impl Default for ClientConfig {
             vehicle: None,
             diag_listen: None,
             mock: false,
+            hold: false,
         }
     }
 }
@@ -86,6 +91,12 @@ impl ClientConfig {
                 Ok(address) => config.diag_listen = Some(address),
                 Err(_) => warn!("Ignoring invalid DOIP_DIAG_LISTEN={listen}"),
             }
+        }
+        if let Ok(hold) = env::var("DOIP_HOLD") {
+            config.hold = matches!(
+                hold.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            );
         }
 
         config
@@ -208,6 +219,7 @@ fn parse_config(
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--mock" => config.mock = true,
+            "--hold" => config.hold = true,
             "--relay" => {
                 config.relay = take_value(&mut args, "--relay")?;
                 if config.relay.trim().is_empty() {
@@ -339,6 +351,12 @@ fn log_startup_status(app: &App, drivers_ok: bool, config: &ClientConfig) {
         logging::log_file_path().display()
     );
     info!("Relay server: {}", config.relay);
+    if config.hold {
+        warn!(
+            "Hold mode is ON: the client pairs with the relay and keeps the socket open \
+             without a vehicle or local DoIP listener."
+        );
+    }
 
     if app.admin_status {
         info!("[OK] Administrator rights available.");
@@ -727,7 +745,7 @@ fn begin_car(app: &mut App, network: &mut NetworkService, config: &ClientConfig)
 
     app.begin_session();
     app.set_session_code(code);
-    network.start_car(session);
+    network.start_car(session, config.hold);
 }
 
 /// Rejects a second session while one is already starting or running.
@@ -775,7 +793,7 @@ fn accept_diag_code(
             info!("Local listener: {listen}");
 
             app.begin_session();
-            network.start_diag(session, listen);
+            network.start_diag(session, listen, config.hold);
         }
         Err(error) => error!("Failed to parse code: {error}"),
     }
@@ -929,6 +947,7 @@ mod config_tests {
         assert_eq!(config.vehicle, None);
         assert_eq!(config.diag_listen, None);
         assert!(!config.mock);
+        assert!(!config.hold);
         assert_eq!(config.vehicle_target(), ("127.0.0.1".to_owned(), 13400));
     }
 
@@ -937,6 +956,7 @@ mod config_tests {
         let config = parse_config(
             args(&[
                 "--mock",
+                "--hold",
                 "--relay",
                 "127.0.0.1:15000",
                 "--vehicle",
@@ -950,6 +970,7 @@ mod config_tests {
         .expect("config");
 
         assert!(config.mock);
+        assert!(config.hold);
         assert_eq!(config.relay, "127.0.0.1:15000");
         assert_eq!(config.vehicle.as_deref(), Some("10.0.0.5:13401"));
         assert_eq!(

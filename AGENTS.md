@@ -157,6 +157,29 @@ and record important architecture decisions as they are made.
   commands use `root@176.53.237.193` directly. A second `nohup` instance was
   deliberately avoided because it would collide with the systemd unit on port
   `13500`; the binary accepts `--listen`, not `--port`.
+  **Client relay finalized (2026-11-26):** the plaintext relay path is complete
+  for the VPS test. The client parses `DT1-...`, uses the relay address embedded
+  in the code (Car default `176.53.237.193:13500`), sends the v1 JSON `hello`
+  and waits for `waiting` → `paired`. `ConnectionStatus` gained a distinct
+  `Waiting` state (`[WAITING]`, yellow) between `Connecting` and `Connected`;
+  `connect_relay` emits it on the server's `waiting` reply. A new
+  `--hold` / `DOIP_HOLD=1` test mode pairs with the relay and keeps the socket
+  open without dialing a vehicle or binding `127.0.0.1:13400` (the Diag skips
+  its local listener entirely), so Car and Diag can run on one Windows machine
+  without the default-port collision. Hold mode is connectivity-only: it reads
+  and discards bytes and is **not** a DoIP tunnel. Verified against the live
+  relay: two native clients driven through PTYs paired in session
+  `b84615fd-74ed-498a-9c5d-fa1ce48c0e24` (Car saw `waiting for the peer`, both
+  logged `Relay paired session`), the server logged `paired session`, and the
+  tunnel stayed open 5.4 s until Ctrl+C.
+  **Windows build (2026-11-26):** `cargo build --release --target
+  x86_64-pc-windows-gnu -p doip-client` produces
+  `target/x86_64-pc-windows-gnu/release/doip-client.exe` (PE32+ x86-64, 13 MB)
+  with the icon/manifest `.rsrc` embedded. No passwordless root was available on
+  this host, so the MinGW-w64 toolchain (binutils 2.47, GCC 16.2, CRT/headers/
+  winpthreads 14.0.0) was downloaded from an Arch mirror and extracted to
+  `~/.local/mingw`; the target is installed and the toolchain must be on `PATH`
+  (`export PATH="$HOME/.local/mingw/usr/bin:$PATH"`).
 - **Next Step:** Backend encryption (TLS/Noise) still deferred by design. Before
   that, consider client hardening: allow a new Diag connection after the first
   one closes (currently one tunnel serves one local DoIP connection), auto-detect
@@ -169,7 +192,8 @@ and record important architecture decisions as they are made.
   the `panic.log` diagnostics commit, the strict post-cleanup lifecycle fix
   (console isolation, quit fence, hidden-window restoration), the plaintext
   relay protocol, server and deployment checkpoints, client relay integration,
-  and the native VPS binary redeploy.
+  and the native VPS binary redeploy, and the finalized client relay + Windows
+  `windows-gnu` build.
 
 ## Architecture
 
@@ -290,8 +314,9 @@ Implemented in `crates/doip-protocol`; shared by `doip-client` and
   binds before pairing. The Car dials the vehicle after `Paired`; the Diag serves
   one local connection per session. Status events: `Connecting` → `Connected` →
   `Disconnected`; task completion sends `NetEvent::Finished`.
-- Client CLI: `--relay`, `--vehicle`, `--diag-listen`, `--mock`; matching
-  `DOIP_RELAY`, `DOIP_VEHICLE`, `DOIP_DIAG_LISTEN` environment variables.
+- Client CLI: `--relay`, `--vehicle`, `--diag-listen`, `--hold`, `--mock`;
+  matching `DOIP_RELAY`, `DOIP_VEHICLE`, `DOIP_DIAG_LISTEN`, `DOIP_HOLD`
+  environment variables.
 
 ## Current TUI behavior
 
@@ -311,8 +336,9 @@ Implemented in `crates/doip-protocol`; shared by `doip-client` and
 - **Status panel:** `Admin Rights`, `Npcap` and `Loopback` (green `[OK]` / red
   `[MISSING]` — a missing value is **never** green), `Log File` (green `[EXISTS]`
   / red `[MISSING]`, based on `doip-remote.log`), and `Connection` (red
-  `[DISCONNECTED]`, yellow `[CONNECTING]` while pairing/waiting, green
-  `[CONNECTED ✓]` while bytes flow).
+  `[DISCONNECTED]`, yellow `[CONNECTING]` during the TCP connect/handshake,
+  yellow `[WAITING]` while the relay waits for the peer, green `[CONNECTED ✓]`
+  while bytes flow).
 - **Menu:** `1. Install Drivers` / `2. I am near the car (Car)` /
   `3. I am a diagnostician (Diag)` / `4. Uninstall drivers and logs` (red) /
   `5. Exit`.
@@ -352,6 +378,13 @@ Implemented in `crates/doip-protocol`; shared by `doip-client` and
   address comes from the code; the client starts the Diag session, which binds
   `127.0.0.1:13400` (or `--diag-listen`) before pairing and serves the first
   local diagnostic connection.
+- **Hold mode (`--hold`, `DOIP_HOLD=1`):** connectivity test without a vehicle or
+  local proxy. The Car pairs with the relay and keeps the socket open instead of
+  dialing the vehicle; the Diag pairs and skips the local listener entirely. Both
+  show `[WAITING]` → `[CONNECTED ✓]` and log `Relay paired session`. Bytes are
+  read and discarded; use `Ctrl+C`/menu 5 to end the session. This is the
+  recommended way to test two instances on one Windows machine, because the
+  normal roles both use `127.0.0.1:13400`.
 - **Uninstall drivers and logs:** opens a confirmation popup (`Enter` confirms,
   `Esc` cancels; `Esc` only closes the modal). Confirmed cleanup is panic-safe
   (`catch_unwind`) and never exits/quits. Sequence: (1) cancel `CancellationToken`
@@ -380,6 +413,35 @@ Implemented in `crates/doip-protocol`; shared by `doip-client` and
   only on Windows. Loopback creation was runtime-tested on Windows 11; the other
   Windows paths were compile-checked.
 
+## Windows end-to-end test (plaintext relay)
+
+The `windows-gnu` `.exe` needs no administrator rights and no drivers for a
+relay connectivity test. On the Windows machine:
+
+1. Copy `doip-client.exe` (13 MB) to a folder, open `cmd.exe` or Windows
+   Terminal there.
+2. Start the Car in hold mode: `doip-client.exe --hold`, press `2`.
+   The green popup shows a `DT1-...` code; press `Enter` to copy it (or select
+   and copy it from the log). The status panel goes `[CONNECTING]` →
+   `[WAITING]`.
+3. Start a second instance: `doip-client.exe --hold`, press `3`, paste the code,
+   press `Enter`.
+4. Both panels switch to `[CONNECTED ✓]` and the logs show
+   `Relay accepted session …` / `Relay paired session …`. The relay journal
+   (`journalctl -u doip-server -n 20 --no-pager`) shows `paired session`.
+5. `Ctrl+C` (or menu `5. Exit`) closes the socket; the server logs
+   `tunnel closed … car_to_diag=0 diag_to_car=0`.
+
+Without `--hold`, both roles use `127.0.0.1:13400` on one machine: the Car dials
+the vehicle there and the Diag binds the same port, so the second instance fails
+to bind. For a real tunnel test, run the Diag with
+`--diag-listen 127.0.0.1:13401` and provide a vehicle/DoIP endpoint on the Car
+side. `--hold` is the supported way to verify pairing to the VPS from one PC.
+
+Windows may show a SmartScreen prompt because the binary is unsigned; choose
+"More info" → "Run anyway". Outbound TCP to `13500` is allowed by default, and
+no inbound firewall rule is needed.
+
 ## Commands
 
 ```sh
@@ -400,8 +462,14 @@ cargo build --release -p doip-server
 scp target/release/doip-server root@176.53.237.193:/root/doip-server
 ssh root@176.53.237.193 'install -m 0755 /root/doip-server /usr/local/bin/doip-server.new && mv /usr/local/bin/doip-server.new /usr/local/bin/doip-server && systemctl restart doip-server'
 cargo run -p doip-client -- --mock   # preview with admin/drivers emulated
+cargo run -p doip-client -- --hold   # pair with the relay only (test mode)
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
+
+# Windows release binary (needs x86_64-pc-windows-gnu + MinGW on PATH)
+export PATH="$HOME/.local/mingw/usr/bin:$PATH"
+cargo build --release --target x86_64-pc-windows-gnu -p doip-client
+# -> target/x86_64-pc-windows-gnu/release/doip-client.exe
 
 # Windows cfg compile check from Linux (no linker needed)
 rustup target add x86_64-pc-windows-msvc
@@ -452,6 +520,22 @@ cargo clippy -p doip-client --all-targets --target x86_64-pc-windows-msvc -- -D 
   pairing test `deploy-verify-1795684067`: `waiting` → `paired`, 10 bytes
   `car→diag`, 11 bytes `diag→car`, `elapsed_ms=15`. `ufw status numbered` shows
   only `22/tcp` and `13500/tcp` for IPv4 and IPv6.
+- Client relay finalization (2026-11-26): `cargo test -p doip-client` — 43 tests
+  pass, including the new `hold_mode_pairs_and_keeps_the_relay_socket_open`
+  (real loopback `doip-server`, `[WAITING]` → `[CONNECTED]`, socket stays open
+  until cancellation). `cargo clippy -p doip-client --all-targets -- -D warnings`
+  and `cargo fmt --all --check` clean.
+- Live hold-mode E2E (2026-11-26): two native clients under PTYs with `--hold`
+  against `176.53.237.193:13500` paired session
+  `b84615fd-74ed-498a-9c5d-fa1ce48c0e24`; the Car logged `waiting for the peer`
+  and both logged `Relay paired session`. Server journal:
+  `paired session` then `tunnel closed ... car_to_diag=0 diag_to_car=0
+  elapsed_ms=5413` after Ctrl+C.
+- Windows cross-build (2026-11-26): `cargo build --release --target
+  x86_64-pc-windows-gnu -p doip-client` — OK in 1m02s;
+  `target/x86_64-pc-windows-gnu/release/doip-client.exe` is a 13 MB PE32+ x86-64
+  console executable with a `.rsrc` section (icon + manifest). Not
+  runtime-tested: this host has neither Windows nor Wine.
 - `cargo fmt --all --check` and
   `cargo clippy --workspace --all-targets -- -D warnings` — clean.
 - Windows target code: `cargo check`/`clippy` for
@@ -499,11 +583,12 @@ cargo clippy -p doip-client --all-targets --target x86_64-pc-windows-msvc -- -D 
 - Build dependencies (`crates/doip-client`): `embed-resource 3.0` and
   `image 0.25` (PNG only). `build.rs` generates the `.ico` itself, so no manual
   conversion is needed.
-- No `rc`/`windres` on this Linux host, so cross-compiling for Windows emits
+- `rc`/`windres` is not on the default `PATH`, so a Windows cross-build without
+  the MinGW toolchain emits
   `embed-resource: compilation not attempted: missing compiler: llvm-rc` as a
-  warning and skips the icon. On a real Windows host (or with `llvm-rc` /
-  `windres` installed) the icon is compiled and linked automatically; a resource
-  compilation failure there is a hard error.
+  warning and skips the icon. With `~/.local/mingw/usr/bin` on `PATH`, its
+  `x86_64-w64-mingw32-windres` compiles and links the resource automatically; a
+  resource compilation failure there is a hard error.
 - TUI stack: `ratatui 0.26` + `crossterm 0.27`; logs use `tracing-appender 0.2`.
   `inquire` was removed in stage 1.
 - Relay host: `176.53.237.193` (`root` SSH key already installed), Debian 13,
@@ -516,6 +601,12 @@ cargo clippy -p doip-client --all-targets --target x86_64-pc-windows-msvc -- -D 
   `root@176.53.237.193` (the key is already installed). The VPS runs Debian 13.7,
   hostname `doip-relay`, glibc `2.41`, which runs binaries built here against
   glibc `2.44` as long as they need at most `GLIBC_2.34`.
+- Windows cross-build: the `x86_64-pc-windows-gnu` target is installed and a
+  MinGW-w64 toolchain (binutils 2.47, GCC 16.2.0, CRT/headers/winpthreads 14.0.0)
+  is extracted to `~/.local/mingw` from Arch packages (no root needed). Add it
+  to `PATH` before building:
+  `export PATH="$HOME/.local/mingw/usr/bin:$PATH"`. Its `windres` embeds the
+  icon and UAC manifest into the `.exe`.
 - The relay is plaintext-only for now (no TLS, no end-to-end encryption), so it
   is for development/staging. Do not expose real vehicle traffic yet.
 
