@@ -8,10 +8,11 @@ and record important architecture decisions as they are made.
 
 ## Current Status (обновляй этот блок каждый день)
 
-- **Date:** 2026-11-26
-- **Phase:** Plaintext client ↔ relay integration complete. The Car/Diag actions
-  now pair through `doip-server` and tunnel raw bytes. TLS/encryption is the next
-  backend milestone.
+- **Date:** 2026-11-27
+- **Phase:** Plaintext L4 proxy is complete and ready for real ZDS testing. The
+  Car dials the vehicle, the Diag exposes `127.0.0.1:13400`, and both pipe raw
+  DoIP bytes through the relay with no idle timeout. TLS/encryption is still the
+  next backend milestone.
 - **Done:** Stage 6/6 — `--mock` mode and final verification. The client is now a
   ratatui dashboard with a menu, dot-aligned status panel, scrolling log console,
   background driver installation, UAC gate and a cleanup modal. `inquire` is gone.
@@ -180,12 +181,34 @@ and record important architecture decisions as they are made.
   winpthreads 14.0.0) was downloaded from an Arch mirror and extracted to
   `~/.local/mingw`; the target is installed and the toolchain must be on `PATH`
   (`export PATH="$HOME/.local/mingw/usr/bin:$PATH"`).
-- **Next Step:** Backend encryption (TLS/Noise) still deferred by design. Before
-  that, consider client hardening: allow a new Diag connection after the first
-  one closes (currently one tunnel serves one local DoIP connection), auto-detect
-  the vehicle IP/loopback adapter, and surface session identifiers in the UI.
-  Then TLS at the relay, followed by X25519 + ChaCha20-Poly1305 as decided.
-  The remaining Windows 11 checklist items are non-blocking.
+  **Plaintext L4 proxy (2026-11-27):** finalized the real proxy for ZDS testing.
+  The Car pairs, immediately reports `[CONNECTED ✓]`, then dials the vehicle
+  (`--vehicle-ip`, default `169.254.19.22:13400`, `--vehicle` kept as an alias)
+  and runs `copy_bidirectional` between the vehicle and the relay. The Diag binds
+  `127.0.0.1:13400` (`--diag-listen`, a bare IP defaults to port `13400`), pairs,
+  reports `[CONNECTED ✓]`, and forwards the first ZDS/local connection with
+  `copy_bidirectional`. There is **no post-pair timeout**: the only bounds are
+  the 10 s connect/handshake timeouts and the 330 s pre-pair wait; once paired,
+  the tunnel stays open until the user exits or a socket closes. When the proxy
+  drops (ZDS closed, cable pulled, vehicle gone) the task logs the reason, the UI
+  returns to red `[DISCONNECTED]`, `session_active` clears, and the menu is usable
+  again — the app never crashes. The CLI now logs the effective vehicle target
+  and Diag listener at startup. `--vehicle-ip`/`DOIP_VEHICLE_IP` and
+  `--diag-listen`/`DOIP_DIAG_LISTEN` are verified by 45 client tests.
+  End-to-end proof with the real binaries: local `doip-server` on
+  `127.0.0.1:13500`, Diag on `127.0.0.1:13400`, Car dialing a mock vehicle on
+  `127.0.0.1:13401`, and a simulated ZDS; both payloads echoed back
+  (`ZDS-routing-activation-request` and a second payload after a 12 s idle
+  period), 63 bytes each way, and both apps stayed alive after ZDS closed. The
+  relay logged `paired session` and
+  `tunnel closed … car_to_diag=63 diag_to_car=63 elapsed_ms=12210`.
+- **Next Step:** Real ZDS testing is unblocked on the plaintext relay. Optional
+  hardening before TLS: accept a new ZDS connection after the first one closes
+  without restarting the session (currently one tunnel serves one local DoIP
+  connection), auto-detect the vehicle IP/loopback adapter, and surface session
+  identifiers in the UI. Then TLS at the relay, followed by X25519 +
+  ChaCha20-Poly1305 as decided. The remaining Windows 11 checklist items are
+  non-blocking.
 - **Repo state:** branch `main`; recent commits include Stage 1-3 UX hardening,
   `feat(ui): add confirmation modal for active session exit`,
   `fix(lifecycle): definitively resolve cleanup crash and implement strict menu blocking`,
@@ -193,7 +216,7 @@ and record important architecture decisions as they are made.
   (console isolation, quit fence, hidden-window restoration), the plaintext
   relay protocol, server and deployment checkpoints, client relay integration,
   and the native VPS binary redeploy, and the finalized client relay + Windows
-  `windows-gnu` build.
+  `windows-gnu` build, and the plaintext L4 proxy for ZDS testing.
 
 ## Architecture
 
@@ -202,10 +225,11 @@ and record important architecture decisions as they are made.
   encryption; client UX hardening continues alongside.
 - **Topology:** `Car (Windows) <-> Relay Server (Linux) <-> Diag (Windows)`.
 - **Data path (implemented):** the Car connects to the relay, waits for the
-  Diag, then dials the vehicle and forwards raw bytes. The Diag connects to the
-  same session using a `DT1-...` code, listens on `127.0.0.1:13400` and forwards
-  the first local diagnostic connection. One relay session serves one DoIP TCP
-  connection.
+  Diag, then dials the vehicle (`--vehicle-ip`, default `169.254.19.22:13400`)
+  and forwards raw bytes with `copy_bidirectional`. The Diag connects to the
+  same session using a `DT1-...` code, listens on `127.0.0.1:13400`, waits for
+  ZDS, and forwards that connection with `copy_bidirectional`. One relay session
+  serves one DoIP TCP connection; there is no idle timeout after pairing.
 - **L2/L4:** **L4 (proxy) is implemented**. **L2** (Npcap + KM-TEST Loopback) on
   Windows is still planned; the client checks and installs the prerequisites but
   does not capture packets yet.
@@ -274,8 +298,10 @@ Next: integrate the relay into `doip-client`; see the Current Status block.
   output work. Missing `l`/`p`/`v` use defaults. Required fields must be
   non-empty; port `0` is rejected.
 - The Car puts the relay address into `server` (`--relay`, default
-  `176.53.237.193:13500`); the Diag parses it from the code. The `role` field
-  records the creator (Car), so the Diag still claims `diag` in its own `Hello`.
+  `176.53.237.193:13500`) and the vehicle address into `vehicle_ip`/`doip_port`
+  (`--vehicle-ip`, default `169.254.19.22:13400`); the Diag parses `server` from
+  the code and ignores the vehicle fields. The `role` field records the creator
+  (Car), so the Diag still claims `diag` in its own `Hello`.
 - The Diag listener defaults to `127.0.0.1:13400`; `doip_port` in the code is the
   **vehicle** port used by the Car, not the local listener.
 
@@ -314,9 +340,11 @@ Implemented in `crates/doip-protocol`; shared by `doip-client` and
   binds before pairing. The Car dials the vehicle after `Paired`; the Diag serves
   one local connection per session. Status events: `Connecting` → `Connected` →
   `Disconnected`; task completion sends `NetEvent::Finished`.
-- Client CLI: `--relay`, `--vehicle`, `--diag-listen`, `--hold`, `--mock`;
-  matching `DOIP_RELAY`, `DOIP_VEHICLE`, `DOIP_DIAG_LISTEN`, `DOIP_HOLD`
-  environment variables.
+- Client CLI: `--relay`, `--vehicle-ip` (alias `--vehicle`), `--diag-listen`,
+  `--hold`, `--mock`; matching `DOIP_RELAY`, `DOIP_VEHICLE_IP` (alias
+  `DOIP_VEHICLE`), `DOIP_DIAG_LISTEN`, `DOIP_HOLD` environment variables.
+  `--vehicle-ip` defaults to `169.254.19.22:13400`; `--diag-listen` defaults to
+  `127.0.0.1:13400` and accepts a bare IP.
 
 ## Current TUI behavior
 
@@ -338,7 +366,7 @@ Implemented in `crates/doip-protocol`; shared by `doip-client` and
   / red `[MISSING]`, based on `doip-remote.log`), and `Connection` (red
   `[DISCONNECTED]`, yellow `[CONNECTING]` during the TCP connect/handshake,
   yellow `[WAITING]` while the relay waits for the peer, green `[CONNECTED ✓]`
-  while bytes flow).
+  as soon as the relay is paired and the L4 proxy is running).
 - **Menu:** `1. Install Drivers` / `2. I am near the car (Car)` /
   `3. I am a diagnostician (Diag)` / `4. Uninstall drivers and logs` (red) /
   `5. Exit`.
@@ -415,6 +443,35 @@ Implemented in `crates/doip-protocol`; shared by `doip-client` and
 
 ## Windows end-to-end test (plaintext relay)
 
+### Real ZDS L4 proxy test (two machines)
+
+Vehicle side (Car):
+
+1. Copy `doip-client.exe` to the vehicle laptop and open `cmd.exe`.
+2. Run `doip-client.exe --vehicle-ip 169.254.19.22:13400` (use the actual
+   vehicle/DoIP address if it differs) and press `2`.
+3. Press `Enter` on the green popup to copy the `DT1-...` code and send it to the
+   technician. The panel goes `[CONNECTING]` → `[WAITING]` → `[CONNECTED ✓]`
+   once the Diag pairs; the log shows `Dialing vehicle …` and
+   `Tunnel established: vehicle … <-> relay`.
+
+Technician side (Diag):
+
+4. Run `doip-client.exe --diag-listen 127.0.0.1:13400`, press `3`, paste the
+   code, press `Enter`.
+5. The panel shows `[CONNECTED ✓]` as soon as the relay is paired, and the log
+   shows `Relay paired. Waiting for ZDS/local diagnostic client on 127.0.0.1:13400...`.
+6. Point ZDS at `127.0.0.1:13400`. The log shows
+   `Diagnostic client connected from …` and
+   `Tunnel established: relay <-> local client …`; bytes now flow both ways
+   until ZDS or the vehicle closes the connection. There is no idle timeout.
+7. When the connection drops, both apps log `Tunnel closed.` (or the failure
+   reason), the panel turns red `[DISCONNECTED]`, and the menu is usable again.
+   Start a new Car session for another run (one session = one DoIP TCP
+   connection).
+
+### Connectivity-only test (one machine)
+
 The `windows-gnu` `.exe` needs no administrator rights and no drivers for a
 relay connectivity test. On the Windows machine:
 
@@ -434,9 +491,7 @@ relay connectivity test. On the Windows machine:
 
 Without `--hold`, both roles use `127.0.0.1:13400` on one machine: the Car dials
 the vehicle there and the Diag binds the same port, so the second instance fails
-to bind. For a real tunnel test, run the Diag with
-`--diag-listen 127.0.0.1:13401` and provide a vehicle/DoIP endpoint on the Car
-side. `--hold` is the supported way to verify pairing to the VPS from one PC.
+to bind. `--hold` is the supported way to verify pairing to the VPS from one PC.
 
 Windows may show a SmartScreen prompt because the binary is unsigned; choose
 "More info" → "Run anyway". Outbound TCP to `13500` is allowed by default, and
@@ -453,7 +508,7 @@ cargo test -p doip-protocol
 cargo test -p doip-server
 cargo run -p doip-server -- --listen 127.0.0.1:13500
 cargo run -p doip-client -- --help
-cargo run -p doip-client -- --relay 127.0.0.1:13500 --vehicle 127.0.0.1:13400
+cargo run -p doip-client -- --relay 127.0.0.1:13500 --vehicle-ip 127.0.0.1:13400
 cargo run -p doip-client -- --relay 127.0.0.1:13500   # Diag mode (menu 3)
 # deployment (see deploy/README.md)
 rsync -az --exclude target --exclude .git ./ root@176.53.237.193:/opt/doip-remote/src/
@@ -536,6 +591,18 @@ cargo clippy -p doip-client --all-targets --target x86_64-pc-windows-msvc -- -D 
   `target/x86_64-pc-windows-gnu/release/doip-client.exe` is a 13 MB PE32+ x86-64
   console executable with a `.rsrc` section (icon + manifest). Not
   runtime-tested: this host has neither Windows nor Wine.
+- L4 proxy E2E (2026-11-27): local `doip-server` on `127.0.0.1:13500`, the real
+  `doip-client` binaries under PTYs (Diag on `127.0.0.1:13400`, Car with
+  `--vehicle-ip 127.0.0.1:13401`), a mock echo vehicle and a simulated ZDS. Two
+  payloads were echoed end-to-end; the second was sent after a 12 s idle period,
+  proving there is no post-pair timeout. Both apps stayed alive after ZDS closed
+  and logged `Tunnel closed.`; the relay logged `paired session` and
+  `tunnel closed … car_to_diag=63 diag_to_car=63 elapsed_ms=12210`. 45 client
+  tests, the full workspace suite, `cargo clippy --workspace --all-targets --
+  -D warnings` and `cargo fmt --all --check` are clean. The refreshed
+  `windows-gnu` `.exe` (13 MB, sha256
+  `67cfd1bceaf164c4b6225395f7cb806a8bdc8a54e1b2bf0a5325793b0bc6de2f`) includes
+  the L4 proxy.
 - `cargo fmt --all --check` and
   `cargo clippy --workspace --all-targets -- -D warnings` — clean.
 - Windows target code: `cargo check`/`clippy` for

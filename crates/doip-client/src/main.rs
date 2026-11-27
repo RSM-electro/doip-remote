@@ -14,7 +14,7 @@ mod ui;
 use std::{
     collections::VecDeque,
     env, io,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     process::ExitCode,
     sync::{Arc, Mutex},
     time::Duration,
@@ -33,8 +33,11 @@ use tracing::{error, info, warn};
 /// Deployed plaintext relay used when `--relay` is not given.
 const DEFAULT_RELAY_SERVER: &str = "176.53.237.193:13500";
 
-/// Vehicle target used when `--vehicle` is not given (development default).
-const DEFAULT_VEHICLE_TARGET: &str = "127.0.0.1";
+/// Vehicle target used when `--vehicle-ip` is not given.
+///
+/// `169.254.19.22` is the common DoIP link-local address of the vehicle's
+/// diagnostic entity.
+const DEFAULT_VEHICLE_IP: &str = "169.254.19.22";
 
 /// Command-line help.
 const HELP: &str = "\
@@ -44,8 +47,11 @@ Usage: doip-client [OPTIONS]
 
 Options:
   --relay <ADDR>           Relay server address [default: 176.53.237.193:13500]
-  --vehicle <HOST[:PORT]>  Vehicle target for Car mode [default: 127.0.0.1:13400]
-  --diag-listen <ADDR>     Local listener for Diag mode [default: 127.0.0.1:13400]
+  --vehicle-ip <HOST[:PORT]>
+                           Vehicle target for Car mode [default: 169.254.19.22:13400]
+  --vehicle <HOST[:PORT]>  Deprecated alias for --vehicle-ip
+  --diag-listen <IP[:PORT]>
+                           Local listener for Diag mode [default: 127.0.0.1:13400]
   --hold                   Pair and keep the relay socket open (test mode)
   --mock                   Preview the dashboard without drivers
   -h, --help               Print help
@@ -55,7 +61,7 @@ Options:
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ClientConfig {
     relay: String,
-    vehicle: Option<String>,
+    vehicle_ip: Option<String>,
     diag_listen: Option<SocketAddr>,
     mock: bool,
     /// Pair with the relay and keep the socket open without a vehicle or local
@@ -67,7 +73,7 @@ impl Default for ClientConfig {
     fn default() -> Self {
         Self {
             relay: DEFAULT_RELAY_SERVER.to_owned(),
-            vehicle: None,
+            vehicle_ip: None,
             diag_listen: None,
             mock: false,
             hold: false,
@@ -83,11 +89,11 @@ impl ClientConfig {
         if let Ok(relay) = env::var("DOIP_RELAY") {
             config.relay = relay;
         }
-        if let Ok(vehicle) = env::var("DOIP_VEHICLE") {
-            config.vehicle = Some(vehicle);
+        if let Ok(vehicle) = env::var("DOIP_VEHICLE_IP").or_else(|_| env::var("DOIP_VEHICLE")) {
+            config.vehicle_ip = Some(vehicle);
         }
         if let Ok(listen) = env::var("DOIP_DIAG_LISTEN") {
-            match listen.parse() {
+            match parse_socket_addr(&listen) {
                 Ok(address) => config.diag_listen = Some(address),
                 Err(_) => warn!("Ignoring invalid DOIP_DIAG_LISTEN={listen}"),
             }
@@ -104,21 +110,35 @@ impl ClientConfig {
 
     /// Vehicle host and port used by Car mode.
     fn vehicle_target(&self) -> (String, u16) {
-        let raw = self
-            .vehicle
+        self.vehicle_ip
             .as_deref()
-            .unwrap_or(DEFAULT_VEHICLE_TARGET)
-            .trim();
+            .and_then(|value| parse_host_port_or_default(value, DEFAULT_DOIP_PORT))
+            .unwrap_or_else(|| (DEFAULT_VEHICLE_IP.to_owned(), DEFAULT_DOIP_PORT))
+    }
 
-        parse_host_port(raw)
-            .unwrap_or_else(|| (DEFAULT_VEHICLE_TARGET.to_owned(), DEFAULT_DOIP_PORT))
+    /// Local listener used by Diag mode.
+    fn diag_listen_addr(&self) -> SocketAddr {
+        self.diag_listen
+            .unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], DEFAULT_DOIP_PORT)))
     }
 }
 
-/// Splits `host[:port]`, accepting plain hosts and IPv4/IPv6 literals.
-fn parse_host_port(value: &str) -> Option<(String, u16)> {
+/// Splits `host[:port]`, defaulting a missing port to `default_port` and
+/// accepting a bare hostname.
+fn parse_host_port_or_default(value: &str, default_port: u16) -> Option<(String, u16)> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+
     if let Ok(address) = value.parse::<SocketAddr>() {
         return Some((address.ip().to_string(), address.port()));
+    }
+    if let Ok(ip) = value.parse::<IpAddr>() {
+        return Some((ip.to_string(), default_port));
+    }
+    if !value.contains(':') {
+        return Some((value.to_owned(), default_port));
     }
 
     let (host, port) = value.rsplit_once(':')?;
@@ -127,6 +147,19 @@ fn parse_host_port(value: &str) -> Option<(String, u16)> {
     }
 
     Some((host.to_owned(), port.parse().ok()?))
+}
+
+/// Parses an `IP` or `IP:PORT` listener address; a missing port is `13400`.
+fn parse_socket_addr(value: &str) -> Result<SocketAddr, String> {
+    let value = value.trim();
+    if let Ok(address) = value.parse::<SocketAddr>() {
+        return Ok(address);
+    }
+    if let Ok(ip) = value.parse::<IpAddr>() {
+        return Ok(SocketAddr::new(ip, DEFAULT_DOIP_PORT));
+    }
+
+    Err(format!("invalid address `{value}`; expected IP or IP:PORT"))
 }
 
 fn cleanup_trace(message: &str) {
@@ -226,18 +259,21 @@ fn parse_config(
                     return Err("--relay must not be empty".to_owned());
                 }
             }
-            "--vehicle" => {
-                let value = take_value(&mut args, "--vehicle")?;
+            "--vehicle-ip" | "--vehicle" => {
+                let flag = if argument == "--vehicle-ip" {
+                    "--vehicle-ip"
+                } else {
+                    "--vehicle"
+                };
+                let value = take_value(&mut args, flag)?;
                 if value.trim().is_empty() {
-                    return Err("--vehicle must not be empty".to_owned());
+                    return Err(format!("{flag} must not be empty"));
                 }
-                config.vehicle = Some(value);
+                config.vehicle_ip = Some(value);
             }
             "--diag-listen" => {
                 let value = take_value(&mut args, "--diag-listen")?;
-                config.diag_listen = Some(value.parse().map_err(|_| {
-                    format!("invalid --diag-listen address `{value}`; expected IP:PORT")
-                })?);
+                config.diag_listen = Some(parse_socket_addr(&value)?);
             }
             "--help" | "-h" => {
                 println!("{HELP}");
@@ -351,6 +387,12 @@ fn log_startup_status(app: &App, drivers_ok: bool, config: &ClientConfig) {
         logging::log_file_path().display()
     );
     info!("Relay server: {}", config.relay);
+    let (vehicle_host, vehicle_port) = config.vehicle_target();
+    info!(
+        "Car vehicle target: {}",
+        format_target(&vehicle_host, vehicle_port)
+    );
+    info!("Diag listener: {}", config.diag_listen_addr());
     if config.hold {
         warn!(
             "Hold mode is ON: the client pairs with the relay and keeps the socket open \
@@ -781,9 +823,7 @@ fn accept_diag_code(
 
     match SessionCode::parse(input) {
         Ok(session) => {
-            let listen = config
-                .diag_listen
-                .unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], DEFAULT_DOIP_PORT)));
+            let listen = config.diag_listen_addr();
 
             info!("[OK] Code accepted. Relay: {}", session.server);
             info!(
@@ -938,17 +978,24 @@ mod config_tests {
     }
 
     #[test]
-    fn defaults_target_the_deployed_relay_and_loopback_vehicle() {
+    fn defaults_target_the_deployed_relay_and_doip_link_local_vehicle() {
         let config = parse_config(args(&[]), ClientConfig::default())
             .unwrap()
             .expect("config");
 
         assert_eq!(config.relay, DEFAULT_RELAY_SERVER);
-        assert_eq!(config.vehicle, None);
+        assert_eq!(config.vehicle_ip, None);
         assert_eq!(config.diag_listen, None);
         assert!(!config.mock);
         assert!(!config.hold);
-        assert_eq!(config.vehicle_target(), ("127.0.0.1".to_owned(), 13400));
+        assert_eq!(
+            config.vehicle_target(),
+            (DEFAULT_VEHICLE_IP.to_owned(), 13400)
+        );
+        assert_eq!(
+            config.diag_listen_addr(),
+            SocketAddr::from(([127, 0, 0, 1], 13400))
+        );
     }
 
     #[test]
@@ -959,7 +1006,7 @@ mod config_tests {
                 "--hold",
                 "--relay",
                 "127.0.0.1:15000",
-                "--vehicle",
+                "--vehicle-ip",
                 "10.0.0.5:13401",
                 "--diag-listen",
                 "127.0.0.1:13400",
@@ -972,7 +1019,7 @@ mod config_tests {
         assert!(config.mock);
         assert!(config.hold);
         assert_eq!(config.relay, "127.0.0.1:15000");
-        assert_eq!(config.vehicle.as_deref(), Some("10.0.0.5:13401"));
+        assert_eq!(config.vehicle_ip.as_deref(), Some("10.0.0.5:13401"));
         assert_eq!(
             config.diag_listen,
             Some(SocketAddr::from(([127, 0, 0, 1], 13400)))
@@ -981,12 +1028,44 @@ mod config_tests {
     }
 
     #[test]
+    fn vehicle_flag_is_a_compatibility_alias() {
+        let config = parse_config(
+            args(&["--vehicle", "192.168.1.10"]),
+            ClientConfig::default(),
+        )
+        .unwrap()
+        .expect("config");
+
+        assert_eq!(config.vehicle_ip.as_deref(), Some("192.168.1.10"));
+        assert_eq!(config.vehicle_target(), ("192.168.1.10".to_owned(), 13400));
+    }
+
+    #[test]
+    fn bare_listener_addresses_default_to_the_doip_port() {
+        let config = parse_config(args(&["--diag-listen", "0.0.0.0"]), ClientConfig::default())
+            .unwrap()
+            .expect("config");
+
+        assert_eq!(
+            config.diag_listen_addr(),
+            SocketAddr::from(([0, 0, 0, 0], 13400))
+        );
+    }
+
+    #[test]
     fn invalid_arguments_are_rejected() {
         assert!(parse_config(args(&["--relay"]), ClientConfig::default()).is_err());
         assert!(parse_config(args(&["--relay", " "]), ClientConfig::default()).is_err());
         assert!(parse_config(args(&["--vehicle"]), ClientConfig::default()).is_err());
+        assert!(parse_config(args(&["--vehicle-ip"]), ClientConfig::default()).is_err());
+        assert!(parse_config(args(&["--vehicle-ip", " "]), ClientConfig::default()).is_err());
         assert!(parse_config(
             args(&["--diag-listen", "localhost"]),
+            ClientConfig::default()
+        )
+        .is_err());
+        assert!(parse_config(
+            args(&["--diag-listen", "127.0.0.1:not-a-port"]),
             ClientConfig::default()
         )
         .is_err());
@@ -1004,16 +1083,41 @@ mod config_tests {
     }
 
     #[test]
-    fn host_port_parser_accepts_sockets_and_plain_hosts() {
+    fn address_helpers_default_the_doip_port() {
         assert_eq!(
-            parse_host_port("10.1.2.3:15000"),
+            parse_host_port_or_default("10.1.2.3:15000", 13400),
             Some(("10.1.2.3".to_owned(), 15000))
         );
         assert_eq!(
-            parse_host_port("[::1]:13400"),
+            parse_host_port_or_default("169.254.19.22", 13400),
+            Some(("169.254.19.22".to_owned(), 13400))
+        );
+        assert_eq!(
+            parse_host_port_or_default("169.254.19.22:13401", 13400),
+            Some(("169.254.19.22".to_owned(), 13401))
+        );
+        assert_eq!(
+            parse_host_port_or_default("[::1]:13400", 13400),
             Some(("::1".to_owned(), 13400))
         );
-        assert_eq!(parse_host_port("127.0.0.1"), None);
-        assert_eq!(parse_host_port("vehicle.local:not-a-port"), None);
+        assert_eq!(
+            parse_host_port_or_default("vehicle.local", 13400),
+            Some(("vehicle.local".to_owned(), 13400))
+        );
+        assert_eq!(
+            parse_host_port_or_default("vehicle.local:not-a-port", 13400),
+            None
+        );
+        assert_eq!(parse_host_port_or_default("  ", 13400), None);
+
+        assert_eq!(
+            parse_socket_addr("127.0.0.1"),
+            Ok(SocketAddr::from(([127, 0, 0, 1], 13400)))
+        );
+        assert_eq!(
+            parse_socket_addr("127.0.0.1:13401"),
+            Ok(SocketAddr::from(([127, 0, 0, 1], 13401)))
+        );
+        assert!(parse_socket_addr("localhost").is_err());
     }
 }

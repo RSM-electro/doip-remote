@@ -7,11 +7,13 @@ DoIP (Diagnostics over Internet Protocol, ISO 13400). A vehicle-side agent and a
 diagnostic client exchange a compact, copy-pasteable session code to establish a
 tunnel — no VPN setup and no vendor-specific software required.
 
-> **Status (2026-11-25):** The plaintext L4 tunnel works end-to-end. The Car and
-> Diag clients pair through `doip-server` (deployed at `176.53.237.193:13500`),
-> the Car dials the vehicle, the Diag listens on `127.0.0.1:13400`, and raw DoIP
-> bytes are forwarded. A public end-to-end echo test passed. TLS and payload
-> encryption come next.
+> **Status (2026-11-27):** The plaintext L4 proxy is ready for real ZDS testing.
+> The Car and Diag clients pair through `doip-server` (deployed at
+> `176.53.237.193:13500`), the Car dials the vehicle (`--vehicle-ip`, default
+> `169.254.19.22:13400`), the Diag listens on `127.0.0.1:13400`
+> (`--diag-listen`), and raw DoIP bytes are forwarded both ways with no idle
+> timeout. A simulated ZDS end-to-end test passed. TLS and payload encryption
+> come next.
 > See [AGENTS.md](AGENTS.md) for the full project context and next steps.
 
 ## Highlights
@@ -25,8 +27,10 @@ tunnel — no VPN setup and no vendor-specific software required.
   Adapter, and installs them in the background.
 - **Plaintext relay server** — pairs a Car and a Diag by session id/token, then
   forwards raw DoIP bytes; deployed on a small Linux host.
-- **Real L4 tunnel** — the Car dials the vehicle, the Diag exposes
-  `127.0.0.1:13400`, and both bridge to the relay with `copy_bidirectional`.
+- **Real L4 tunnel** — the Car dials the vehicle (`--vehicle-ip`), the Diag
+  exposes `127.0.0.1:13400`, and both bridge to the relay with
+  `copy_bidirectional`; the tunnel stays open until a socket closes or the user
+  exits.
 - **Single binary client** — no configuration files.
 - **Rust** — memory safety, predictable performance and easy cross-compilation.
 

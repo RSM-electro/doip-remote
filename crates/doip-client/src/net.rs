@@ -229,8 +229,11 @@ async fn car_session(
         result = connect_relay(session, Role::Car, events) => result?,
     };
 
+    // The relay tunnel is live as soon as the peer pairs. The vehicle dial is
+    // the next step; a failure there is reported as a disconnect reason.
+    let _ = events.send(NetEvent::Status(ConnectionStatus::Connected));
+
     if hold {
-        let _ = events.send(NetEvent::Status(ConnectionStatus::Connected));
         info!("[OK] Hold mode: relay session paired; no vehicle dial-out.");
         return hold_open(relay, cancel).await;
     }
@@ -268,7 +271,6 @@ async fn car_session(
     info!("[OK] Tunnel established: vehicle {vehicle} <-> relay.");
 
     let mut relay = relay;
-    let _ = events.send(NetEvent::Status(ConnectionStatus::Connected));
     bridge(&mut relay, &mut vehicle_stream, "vehicle", cancel).await;
     Ok(())
 }
@@ -350,7 +352,8 @@ async fn serve_diag_inner(
         result = connect_relay(session, Role::Diag, events) => result?,
     };
 
-    info!("Waiting for a local diagnostic client on {listen}...");
+    let _ = events.send(NetEvent::Status(ConnectionStatus::Connected));
+    info!("Relay paired. Waiting for ZDS/local diagnostic client on {listen}...");
     let (mut local, peer) = tokio::select! {
         () = cancel.cancelled() => return Err(cancelled_error()),
         accepted = listener.accept() => accepted?,
@@ -361,7 +364,6 @@ async fn serve_diag_inner(
     info!("[OK] Tunnel established: relay <-> local client {peer}.");
 
     let mut relay = relay;
-    let _ = events.send(NetEvent::Status(ConnectionStatus::Connected));
     bridge(&mut relay, &mut local, "diagnostic client", cancel).await;
     Ok(())
 }
